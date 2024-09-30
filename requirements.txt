@@ -1,0 +1,9 @@
+streamlit
+requests
+# Removed gradio as it's no longer needed
+pinecone-client
+huggingface-hub
+umap-learn
+plotly
+pandas
+numpy
