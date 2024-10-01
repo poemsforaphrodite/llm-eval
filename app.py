@@ -332,7 +332,6 @@ if st.session_state.user:
         st.title("Dashboard")
         st.write("### Real-time Metrics and Performance Insights")
         
-        # {{ edit_7: Add model selection dropdown }}
         user = users_collection.find_one({"username": st.session_state.user})
         user_models = user.get("models", [])
         
@@ -343,121 +342,123 @@ if st.session_state.user:
             st.error("You have no uploaded models.")
             selected_model = "All Models"
         
-        # Fetch evaluation results from MongoDB
         try:
             query = {"username": st.session_state.user}
             if selected_model != "All Models":
                 query["model_name"] = selected_model
-                # If model_name is None, fall back to model_id
                 if not selected_model:
-                    # Assuming model_id is unique and known
                     query = {"username": st.session_state.user, "model_id": selected_model}
             results = list(results_collection.find(query))
             if results:
-                # Convert to DataFrame
                 df = pd.DataFrame(results)
                 
-                # Extract evaluation metrics into separate columns and convert to percentage
                 metrics = ["Accuracy", "Hallucination", "Groundedness", "Relevance", "Recall", "Precision", "Consistency", "Bias Detection"]
                 for metric in metrics:
                     df[metric] = df['evaluation'].apply(lambda x: x.get(metric, {}).get('score', 0) * 100)
                 
-                # Convert timestamp to datetime
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df['query_number'] = range(1, len(df) + 1)  # Add query numbers
                 
-                # {{ edit_8: Cache the graph creation to ensure it's only generated once }}
                 @st.cache_data
                 def create_metrics_graph(df, metrics):
                     fig = px.line(
                         df, 
-                        x='timestamp', 
+                        x='query_number',  # Use query numbers on x-axis
                         y=metrics, 
-                        title='Metrics Over Time',
+                        title='Metrics Over Queries',
                         labels={metric: f"{metric} (%)" for metric in metrics},
                         markers=True,
-                        template='plotly_dark'
+                        template='plotly_dark',
                     )
-                    # Customize colors for each metric
                     color_discrete_sequence = px.colors.qualitative.Dark24
                     for i, metric in enumerate(metrics):
                         fig.data[i].line.color = color_discrete_sequence[i % len(color_discrete_sequence)]
+                        fig.data[i].marker.color = color_discrete_sequence[i % len(color_discrete_sequence)]
+                    fig.update_layout(
+                        xaxis_title="Query Number",
+                        yaxis_title="Metric Score (%)",
+                        legend_title="Metrics",
+                        hovermode="x unified",
+                        margin=dict(l=50, r=50, t=100, b=50),
+                        height=500
+                    )
                     return fig
-
+                
                 fig = create_metrics_graph(df, metrics)
 
-                # Display the Plotly chart and capture click events
-                clicked_points = plotly_events(fig, click_event=True, hover_event=False)
-                
-                #st.plotly_chart(fig, use_container_width=True)
-                
-                # Handle click events
-                if clicked_points:
-                    clicked_point = clicked_points[0]
-                    clicked_timestamp = clicked_point['x']
-                    
-                    # Filter the DataFrame for the clicked timestamp
-                    detailed_results = df[df['timestamp'] == pd.to_datetime(clicked_timestamp)]
-                    
-                    st.markdown(f"### Detailed Data for **{clicked_timestamp}**")
-                    
-                    # Display detailed data in a table
-                    st.dataframe(
-                        detailed_results[[
-                            'model_name', 'prompt', 'context', 'response', 'Accuracy',
-                            'Hallucination', 'Groundedness', 'Relevance', 'Recall',
-                            'Precision', 'Consistency', 'Bias Detection', 'timestamp'
-                        ]].style.format({
-                            "Accuracy": "{:.2f}%",
-                            "Hallucination": "{:.2f}%",
-                            "Groundedness": "{:.2f}%",
-                            "Relevance": "{:.2f}%",
-                            "Recall": "{:.2f}%",
-                            "Precision": "{:.2f}%",
-                            "Consistency": "{:.2f}%",
-                            "Bias Detection": "{:.2f}%"
-                        }).background_gradient(cmap='Greens')
-                    )
-                
-                # Latest metrics section continues...
-                st.subheader("Latest Metrics")
-                latest_result = df.sort_values(by='timestamp', ascending=False).iloc[0]
-                latest_metrics = {
-                    "Accuracy": latest_result["Accuracy"],
-                    "Hallucination": latest_result["Hallucination"],
-                    "Groundedness": latest_result["Groundedness"],
-                    "Relevance": latest_result["Relevance"],
-                    "Recall": latest_result["Recall"],
-                    "Precision": latest_result["Precision"],
-                    "Consistency": latest_result["Consistency"],
-                    "Bias Detection": latest_result["Bias Detection"]
-                }
+                st.plotly_chart(fig, use_container_width=True)
 
-                # Define the number of columns per row
-                cols_per_row = 4
-                metric_items = list(latest_metrics.items())
-                
-                for i in range(0, len(metric_items), cols_per_row):
-                    cols = st.columns(cols_per_row)
-                    for j, (metric, value) in enumerate(metric_items[i:i+cols_per_row]):
-                        with cols[j]:
-                            # Determine color based on value
-                            if metric in ["Accuracy", "Hallucination", "Groundedness", "Relevance", "Recall", "Precision", "Consistency"]:
-                                color = 'green' if value >= 75 else 'orange' if value >= 50 else 'red'
-                            else:  # Bias Detection
-                                color = 'green' if value >= 75 else 'red'
-                            
-                            # Display metric with colored progress bar
-                            st.markdown(f"**{metric}**")
-                            st.progress(value / 100)
-                            st.markdown(f"<p style='color:{color};'>{value:.2f}%</p>", unsafe_allow_html=True)
-                
-                # Worst Performing Slice Analysis (placeholder)
+                # Latest Metrics
+                st.subheader("Latest Metrics")
+                latest_result = df.iloc[-1]  # Get the last row (most recent query)
+                latest_metrics = {metric: latest_result[metric] for metric in metrics}
+
+                cols = st.columns(4)
+                for i, (metric, value) in enumerate(latest_metrics.items()):
+                    with cols[i % 4]:
+                        color = 'green' if value >= 75 else 'orange' if value >= 50 else 'red'
+                        st.metric(label=metric, value=f"{value:.2f}%", delta=None)
+                        st.progress(value / 100)
+
+                # Detailed Data View
+                st.subheader("Detailed Data View")
+                if st.checkbox("Show Detailed Data"):
+                    # Prepare the data for display
+                    display_data = []
+                    for _, row in df.iterrows():
+                        display_row = {
+                            "Query Number": row['query_number'],
+                            "Timestamp": row['timestamp'],
+                            "Prompt": row['prompt'][:50] + "...",  # Truncate long prompts
+                            "Context": row['context'][:50] + "...",  # Truncate long contexts
+                            "Response": row['response'][:50] + "...",  # Truncate long responses
+                        }
+                        # Add metrics to the display row
+                        for metric in metrics:
+                            display_row[metric] = f"{row[metric]:.2f}%"
+                        
+                        display_data.append(display_row)
+                    
+                    # Convert to DataFrame for easy display
+                    display_df = pd.DataFrame(display_data)
+                    
+                    # Display the table with custom styling
+                    st.dataframe(
+                        display_df.style.set_properties(**{
+                            'background-color': '#f0f8ff',
+                            'color': '#333',
+                            'border': '1px solid #ddd'
+                        }).set_table_styles([
+                            {'selector': 'th', 'props': [('background-color', '#4CAF50'), ('color', 'white')]},
+                            {'selector': 'td', 'props': [('text-align', 'left')]}
+                        ]), 
+                        use_container_width=True,
+                        height=400  # Set a fixed height with scrolling
+                    )
+                    
+                    # Add an expander for viewing full details of a specific query
+                    with st.expander("View Full Details for a Specific Query"):
+                        query_number = st.number_input("Enter Query Number", min_value=1, max_value=len(df), value=1, step=1)
+                        if st.button("Show Full Details"):
+                            full_details = df[df['query_number'] == query_number].iloc[0]
+                            st.write(f"**Query Number:** {query_number}")
+                            st.write(f"**Timestamp:** {full_details['timestamp']}")
+                            st.write(f"**Prompt:** {full_details['prompt']}")
+                            st.write(f"**Context:** {full_details['context']}")
+                            st.write(f"**Response:** {full_details['response']}")
+                            st.write("**Metrics:**")
+                            metrics_df = pd.DataFrame({
+                                "Metric": metrics,
+                                "Score": [full_details[metric] for metric in metrics]
+                            })
+                            st.dataframe(metrics_df.style.format({"Score": "{:.2f}%"}))
+
+                # Placeholders for future sections
                 st.subheader("Worst Performing Slice Analysis")
-                st.write("This section will show analysis of the worst-performing data slices.")
+                st.info("This section will show analysis of the worst-performing data slices.")
                 
-                # UMAP Visualization (placeholder)
                 st.subheader("UMAP Visualization")
-                st.write("This section will contain UMAP visualizations for dimensionality reduction insights.")
+                st.info("This section will contain UMAP visualizations for dimensionality reduction insights.")
             else:
                 st.info("No evaluation results available for the selected model.")
         except Exception as e:
@@ -602,7 +603,6 @@ if st.session_state.user:
                 st.error("Please provide valid JSON input.")
             else:
                 with st.spinner("Testing in progress..."):
-                    # {{ edit_5: Append prompt testing data to the selected model using model_name }}
                     user = users_collection.find_one({"username": st.session_state.user})
                     models = user.get("models", [])
                     selected_model = next((m for m in models if (m['model_name'] == model_name) or (m['model_id'] == model_name)), None)
@@ -619,9 +619,9 @@ if st.session_state.user:
                                 if 'response' not in item:
                                     item['response'] = generate_response(item['prompt'], item['context'])
                                 evaluation = teacher_evaluate(item['prompt'], item['context'], item['response'])
-                                save_results(selected_model, item['prompt'], item['context'], item['response'], evaluation)
+                                save_results(selected_model, item['prompt'], item['context'], item['response'], evaluation)  # {{ edit_23: Save results immediately after processing each prompt }}
                                 
-                                # {{ edit_22: Enhanced display of results with expandable sections }}
+                                # Enhanced display of results with expandable sections
                                 with st.expander("View Results"):
                                     st.markdown("**Model Response:**")
                                     st.write(item['response'])
@@ -635,7 +635,7 @@ if st.session_state.user:
                                         'background-color': '#f9f9f9',
                                         'color': '#333',
                                         'border': '1px solid #ddd'
-                                    }).hide_index())
+                                    }))
                                 
                                 st.markdown("---")
                         else:
@@ -643,9 +643,9 @@ if st.session_state.user:
                             if 'response' not in data:
                                 data['response'] = generate_response(data['prompt'], data['context'])
                             evaluation = teacher_evaluate(data['prompt'], data['context'], data['response'])
-                            save_results(selected_model, data['prompt'], data['context'], data['response'], evaluation)
+                            save_results(selected_model, data['prompt'], data['context'], data['response'], evaluation)  # {{ edit_24: Save result immediately after processing the prompt }}
                             
-                            # {{ edit_23: Enhanced display of single test results with expandable sections }}
+                            # Enhanced display of single test results with expandable sections
                             with st.expander("View Results"):
                                 st.subheader("Model Response:")
                                 st.write(data['response'])
@@ -660,7 +660,7 @@ if st.session_state.user:
                                     'background-color': '#f9f9f9',
                                     'color': '#333',
                                     'border': '1px solid #ddd'
-                                }).hide_index())
+                                }))
                         
                         st.success("Testing Completed and Results Saved!")
                     else:

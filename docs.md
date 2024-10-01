@@ -70,7 +70,7 @@
     - Error tracking for future fine-tuning
     - API and Python library for external integration
 
-    You are tasked with generating synthetic data on the topic of machine learning. Your goal is to create a diverse set of prompts, contexts, and responses that vary in different aspects such as accuracy, hallucination, groundedness, relevance, recall, precision, consistency, and bias detection.
+You are tasked with generating synthetic data on the topic of machine learning. Your goal is to create a diverse set of prompts, contexts, and responses that vary in different aspects such as accuracy, hallucination, groundedness, relevance, recall, precision, consistency, and bias detection.
 
 Generate the data in the following JSON format:
 ```json
