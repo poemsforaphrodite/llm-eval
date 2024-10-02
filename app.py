@@ -9,8 +9,12 @@ from dotenv import load_dotenv
 import os
 import bcrypt
 from openai import OpenAI
-from streamlit_plotly_events import plotly_events  # {{ edit_1: Re-added import for 'plotly_events' }}
-from pinecone import Pinecone, ServerlessSpec  # {{ edit_10: Import Pinecone classes instead of pinecone }}
+from streamlit_plotly_events import plotly_events
+from pinecone import Pinecone, ServerlessSpec
+import threading  # {{ edit_25: Import threading for background processing }}
+
+# Set page configuration to wide mode
+st.set_page_config(layout="wide")
 
 # Load environment variables
 load_dotenv()
@@ -205,9 +209,9 @@ def upload_model(file, username, model_type):
         return "Invalid model type specified."
 
 # Function to save results to MongoDB
-def save_results(model, prompt, context, response, evaluation):
+def save_results(username, model, prompt, context, response, evaluation):  # {{ edit_29: Add 'username' parameter }}
     result = {
-        "username": st.session_state.user,
+        "username": username,  # Use the passed 'username' parameter
         "model_id": model['model_id'],  # {{ edit_19: Associate results with 'model_id' }}
         "model_name": model.get('model_name'),
         "model_type": model.get('model_type', 'custom'),  # {{ edit_20: Include 'model_type' in results }}
@@ -332,7 +336,11 @@ if st.session_state.user:
         st.title("Dashboard")
         st.write("### Real-time Metrics and Performance Insights")
         
+        # Fetch the user from the database
         user = users_collection.find_one({"username": st.session_state.user})
+        if user is None:
+            st.error("User not found in the database.")
+            st.stop()
         user_models = user.get("models", [])
         
         if user_models:
@@ -354,8 +362,8 @@ if st.session_state.user:
                 
                 metrics = ["Accuracy", "Hallucination", "Groundedness", "Relevance", "Recall", "Precision", "Consistency", "Bias Detection"]
                 for metric in metrics:
-                    df[metric] = df['evaluation'].apply(lambda x: x.get(metric, {}).get('score', 0) * 100)
-                
+                    df[metric] = df['evaluation'].apply(lambda x: x.get(metric, {}).get('score', 0) if x else 0) * 100
+
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 df['query_number'] = range(1, len(df) + 1)  # Add query numbers
                 
@@ -380,7 +388,7 @@ if st.session_state.user:
                         legend_title="Metrics",
                         hovermode="x unified",
                         margin=dict(l=50, r=50, t=100, b=50),
-                        height=500
+                        height=700  # Increase the height of the graph
                     )
                     return fig
                 
@@ -402,56 +410,73 @@ if st.session_state.user:
 
                 # Detailed Data View
                 st.subheader("Detailed Data View")
-                if st.checkbox("Show Detailed Data"):
-                    # Prepare the data for display
-                    display_data = []
-                    for _, row in df.iterrows():
-                        display_row = {
-                            "Query Number": row['query_number'],
-                            "Timestamp": row['timestamp'],
-                            "Prompt": row['prompt'][:50] + "...",  # Truncate long prompts
-                            "Context": row['context'][:50] + "...",  # Truncate long contexts
-                            "Response": row['response'][:50] + "...",  # Truncate long responses
-                        }
-                        # Add metrics to the display row
-                        for metric in metrics:
-                            display_row[metric] = f"{row[metric]:.2f}%"
-                        
-                        display_data.append(display_row)
+                # Prepare the data for display
+                display_data = []
+                for _, row in df.iterrows():
+                    display_row = {
+                        "Prompt": row['prompt'][:50] + "...",  # Truncate long prompts
+                        "Context": row['context'][:50] + "...",  # Truncate long contexts
+                        "Response": row['response'][:50] + "...",  # Truncate long responses
+                    }
+                    # Add metrics to the display row
+                    for metric in metrics:
+                        display_row[metric] = row[metric]  # Store as float, not string
                     
-                    # Convert to DataFrame for easy display
-                    display_df = pd.DataFrame(display_data)
-                    
-                    # Display the table with custom styling
-                    st.dataframe(
-                        display_df.style.set_properties(**{
-                            'background-color': '#f0f8ff',
-                            'color': '#333',
-                            'border': '1px solid #ddd'
-                        }).set_table_styles([
-                            {'selector': 'th', 'props': [('background-color', '#4CAF50'), ('color', 'white')]},
-                            {'selector': 'td', 'props': [('text-align', 'left')]}
-                        ]), 
-                        use_container_width=True,
-                        height=400  # Set a fixed height with scrolling
-                    )
-                    
-                    # Add an expander for viewing full details of a specific query
-                    with st.expander("View Full Details for a Specific Query"):
-                        query_number = st.number_input("Enter Query Number", min_value=1, max_value=len(df), value=1, step=1)
-                        if st.button("Show Full Details"):
-                            full_details = df[df['query_number'] == query_number].iloc[0]
-                            st.write(f"**Query Number:** {query_number}")
-                            st.write(f"**Timestamp:** {full_details['timestamp']}")
-                            st.write(f"**Prompt:** {full_details['prompt']}")
-                            st.write(f"**Context:** {full_details['context']}")
-                            st.write(f"**Response:** {full_details['response']}")
-                            st.write("**Metrics:**")
-                            metrics_df = pd.DataFrame({
-                                "Metric": metrics,
-                                "Score": [full_details[metric] for metric in metrics]
-                            })
-                            st.dataframe(metrics_df.style.format({"Score": "{:.2f}%"}))
+                    display_data.append(display_row)
+
+                # Convert to DataFrame for easy display
+                display_df = pd.DataFrame(display_data)
+
+                # Function to color cells based on score
+                def color_cells(val):
+                    if isinstance(val, float):
+                        if val >= 80:
+                            color = 'green'
+                        elif val >= 60:
+                            color = 'yellow'
+                        else:
+                            color = 'red'
+                        return f'background-color: {color}; color: white'
+                    return ''
+
+                # Apply the styling only to metric columns
+                styled_df = display_df.style.applymap(color_cells, subset=metrics)
+
+                # Format metric columns as percentages
+                for metric in metrics:
+                    styled_df = styled_df.format({metric: "{:.2f}%"})
+
+                # Display the table with custom styling
+                st.dataframe(
+                    styled_df.set_properties(**{
+                        'color': 'white',
+                        'border': '1px solid #ddd'
+                    }).set_table_styles([
+                        {'selector': 'th', 'props': [('background-color', '#4CAF50'), ('color', 'white')]},
+                        {'selector': 'td', 'props': [('text-align', 'left')]},
+                        # Keep background white for Prompt, Context, and Response columns, but text black
+                        {'selector': 'td:nth-child(-n+3)', 'props': [('background-color', 'white !important'), ('color', 'black !important')]}
+                    ]), 
+                    use_container_width=True,
+                    height=400  # Set a fixed height with scrolling
+                )
+                
+                # Add an expander for viewing full details of a specific query
+                with st.expander("View Full Details for a Specific Query", expanded=True):
+                    query_number = st.number_input("Enter Query Number", min_value=1, max_value=len(df), value=1, step=1)
+                    if st.button("Show Full Details"):
+                        full_details = df[df['query_number'] == query_number].iloc[0]
+                        st.write(f"**Query Number:** {query_number}")
+                        st.write(f"**Timestamp:** {full_details['timestamp']}")
+                        st.write(f"**Prompt:** {full_details['prompt']}")
+                        st.write(f"**Context:** {full_details['context']}")
+                        st.write(f"**Response:** {full_details['response']}")
+                        st.write("**Metrics:**")
+                        metrics_df = pd.DataFrame({
+                            "Metric": metrics,
+                            "Score": [full_details[metric] for metric in metrics]
+                        })
+                        st.dataframe(metrics_df.style.format({"Score": "{:.2f}%"}))
 
                 # Placeholders for future sections
                 st.subheader("Worst Performing Slice Analysis")
@@ -463,6 +488,10 @@ if st.session_state.user:
                 st.info("No evaluation results available for the selected model.")
         except Exception as e:
             st.error(f"Error fetching data from database: {e}")
+            st.error("Detailed error information:")
+            st.error(str(e))
+            import traceback
+            st.error(traceback.format_exc())
 
     elif app_mode == "Model Upload":
         st.title("Upload Your Model")
@@ -483,7 +512,11 @@ if st.session_state.user:
         st.title("Evaluate Your Model")
         st.write("### Select Model and Evaluation Metrics")
         
+        # Fetch the user from the database
         user = users_collection.find_one({"username": st.session_state.user})
+        if user is None:
+            st.error("User not found in the database.")
+            st.stop()
         user_models = user.get("models", [])
         
         if not user_models:
@@ -508,7 +541,7 @@ if st.session_state.user:
                     # Fetch the current model document
                     current_model = next((m for m in user_models if (m['model_name'] == model_identifier) or (m['model_id'] == model_identifier)), None)
                     if current_model:
-                        save_results(current_model, prompt, context, response, results)  # {{ edit_21: Pass current_model to save_results }}
+                        save_results(st.session_state.user, current_model, prompt, context, response, results)  # {{ edit_21: Pass current_model to save_results }}
                         st.success("Evaluation Completed!")
                         st.json(results)
                     else:
@@ -583,7 +616,18 @@ if st.session_state.user:
                 try:
                     data = json.loads(json_input)
                     st.success("JSON parsed successfully!")
-                    st.json(data)
+                    
+                    # Display JSON in a table format
+                    st.subheader("Input Data")
+                    df = pd.json_normalize(data)
+                    st.table(df.style.set_properties(**{
+                        'background-color': '#f0f8ff',
+                        'color': '#333',
+                        'border': '1px solid #ddd'
+                    }).set_table_styles([
+                        {'selector': 'th', 'props': [('background-color', '#4CAF50'), ('color', 'white')]},
+                        {'selector': 'td', 'props': [('text-align', 'left')]}
+                    ]))
                 except json.JSONDecodeError:
                     st.error("Invalid JSON. Please check your input.")
         else:
@@ -592,83 +636,68 @@ if st.session_state.user:
                 try:
                     data = json.load(uploaded_file)
                     st.success("JSON file loaded successfully!")
-                    st.json(data)
+                    
+                    # Display JSON in a table format
+                    st.subheader("Input Data")
+                    df = pd.json_normalize(data)
+                    st.table(df.style.set_properties(**{
+                        'background-color': '#f0f8ff',
+                        'color': '#333',
+                        'border': '1px solid #ddd'
+                    }).set_table_styles([
+                        {'selector': 'th', 'props': [('background-color', '#4CAF50'), ('color', 'white')]},
+                        {'selector': 'td', 'props': [('text-align', 'left')]}
+                    ]))
                 except json.JSONDecodeError:
                     st.error("Invalid JSON file. Please check your file contents.")
         
+        # Function to handle background evaluation
+        def run_evaluations(data, selected_model, username):  # {{ edit_30: Add 'username' parameter }}
+            if isinstance(data, list):
+                for item in data:
+                    if 'response' not in item:
+                        item['response'] = generate_response(item['prompt'], item['context'])
+                    evaluation = teacher_evaluate(item['prompt'], item['context'], item['response'])
+                    save_results(username, selected_model, item['prompt'], item['context'], item['response'], evaluation)  # {{ edit_31: Pass 'username' to save_results }}
+                    # Optionally, update completed prompts in session_state or another mechanism
+            else:
+                if 'response' not in data:
+                    data['response'] = generate_response(data['prompt'], data['context'])
+                evaluation = teacher_evaluate(data['prompt'], data['context'], data['response'])
+                save_results(username, selected_model, data['prompt'], data['context'], data['response'], evaluation)  # {{ edit_32: Pass 'username' to save_results }}
+                # Optionally, update completed prompts in session_state or another mechanism
+
+        # In the Prompt Testing section
         if st.button("Run Test"):
             if not model_name:
                 st.error("Please select or add a valid Model.")
             elif not data:
                 st.error("Please provide valid JSON input.")
             else:
-                with st.spinner("Testing in progress..."):
-                    user = users_collection.find_one({"username": st.session_state.user})
-                    models = user.get("models", [])
-                    selected_model = next((m for m in models if (m['model_name'] == model_name) or (m['model_id'] == model_name)), None)
-                    
-                    if selected_model:
-                        if selected_model.get("model_link"):
-                            # Handle model link if necessary
-                            pass  # Implement link handling if required
-                        
-                        if isinstance(data, list):
-                            # Batch processing
-                            for item in data:
-                                st.subheader(f"Evaluation for prompt: {item['prompt'][:50]}...")
-                                if 'response' not in item:
-                                    item['response'] = generate_response(item['prompt'], item['context'])
-                                evaluation = teacher_evaluate(item['prompt'], item['context'], item['response'])
-                                save_results(selected_model, item['prompt'], item['context'], item['response'], evaluation)  # {{ edit_23: Save results immediately after processing each prompt }}
-                                
-                                # Enhanced display of results with expandable sections
-                                with st.expander("View Results"):
-                                    st.markdown("**Model Response:**")
-                                    st.write(item['response'])
-                                    st.markdown("**Teacher Evaluation:**")
-                                    # Create a more aesthetic table for evaluation results
-                                    eval_df = pd.DataFrame([
-                                        {"Metric": metric, "Score": f"{details['score']:.2f}", "Explanation": details['explanation']}
-                                        for metric, details in evaluation.items()
-                                    ])
-                                    st.table(eval_df.style.set_properties(**{
-                                        'background-color': '#f9f9f9',
-                                        'color': '#333',
-                                        'border': '1px solid #ddd'
-                                    }))
-                                
-                                st.markdown("---")
-                        else:
-                            # Single item processing
-                            if 'response' not in data:
-                                data['response'] = generate_response(data['prompt'], data['context'])
-                            evaluation = teacher_evaluate(data['prompt'], data['context'], data['response'])
-                            save_results(selected_model, data['prompt'], data['context'], data['response'], evaluation)  # {{ edit_24: Save result immediately after processing the prompt }}
-                            
-                            # Enhanced display of single test results with expandable sections
-                            with st.expander("View Results"):
-                                st.subheader("Model Response:")
-                                st.write(data['response'])
-                                st.subheader("Teacher Evaluation:")
-                                
-                                # Create a more aesthetic table for evaluation results
-                                eval_df = pd.DataFrame([
-                                    {"Metric": metric, "Score": f"{details['score']:.2f}", "Explanation": details['explanation']}
-                                    for metric, details in evaluation.items()
-                                ])
-                                st.table(eval_df.style.set_properties(**{
-                                    'background-color': '#f9f9f9',
-                                    'color': '#333',
-                                    'border': '1px solid #ddd'
-                                }))
-                        
-                        st.success("Testing Completed and Results Saved!")
-                    else:
-                        st.error("Selected model not found.")
+                # {{ edit_28: Define 'selected_model' based on 'model_name' }}
+                selected_model = next(
+                    (m for m in user_models if (m['model_name'] == model_name) or (m['model_id'] == model_name)),
+                    None
+                )
+                if selected_model:
+                    with st.spinner("Starting evaluations in the background..."):
+                        evaluation_thread = threading.Thread(
+                            target=run_evaluations, 
+                            args=(data, selected_model, st.session_state.user)  # {{ edit_33: Pass 'username' to the thread }}
+                        )
+                        evaluation_thread.start()
+                        st.success("Evaluations are running in the background. You can navigate away or close the site.")
+                        # {{ edit_34: Optionally, track running evaluations in session_state }}
+                else:
+                    st.error("Selected model not found.")
 
     elif app_mode == "Manage Models":
         st.title("Manage Your Models")
+        # Fetch the user from the database
         user = users_collection.find_one({"username": st.session_state.user})
+        if user is None:
+            st.error("User not found in the database.")
+            st.stop()
         user_models = user.get("models", [])
         
         # {{ edit_1: Add option to add a new model }}
