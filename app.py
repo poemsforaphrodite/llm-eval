@@ -12,6 +12,8 @@ from openai import OpenAI
 from streamlit_plotly_events import plotly_events
 from pinecone import Pinecone, ServerlessSpec
 import threading  # {{ edit_25: Import threading for background processing }}
+import tiktoken
+from tiktoken.core import Encoding
 
 # Set page configuration to wide mode
 st.set_page_config(layout="wide")
@@ -31,6 +33,9 @@ openai_client = OpenAI()  # {{ edit_12: Rename OpenAI client to 'openai_client' 
 
 # Initialize Pinecone
 pinecone_client = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))  # {{ edit_13: Initialize Pinecone client using Pinecone class }}
+
+# Initialize the tokenizer
+tokenizer: Encoding = tiktoken.get_encoding("cl100k_base")  # This is suitable for GPT-4 and recent models
 
 # Authentication functions
 def hash_password(password):
@@ -288,6 +293,10 @@ def generate_dummy_data():
     }
     return pd.DataFrame(data)
 
+# Function to count tokens
+def count_tokens(text: str) -> int:
+    return len(tokenizer.encode(text))
+
 # Sidebar Navigation
 st.sidebar.title("LLM Evaluation System")
 
@@ -360,6 +369,14 @@ if st.session_state.user:
             if results:
                 df = pd.DataFrame(results)
                 
+                # Count tokens for prompt, context, and response
+                df['prompt_tokens'] = df['prompt'].apply(count_tokens)
+                df['context_tokens'] = df['context'].apply(count_tokens)
+                df['response_tokens'] = df['response'].apply(count_tokens)
+                
+                # Calculate total tokens for each row
+                df['total_tokens'] = df['prompt_tokens'] + df['context_tokens'] + df['response_tokens']
+                
                 metrics = ["Accuracy", "Hallucination", "Groundedness", "Relevance", "Recall", "Precision", "Consistency", "Bias Detection"]
                 for metric in metrics:
                     df[metric] = df['evaluation'].apply(lambda x: x.get(metric, {}).get('score', 0) if x else 0) * 100
@@ -410,6 +427,18 @@ if st.session_state.user:
 
                 # Detailed Data View
                 st.subheader("Detailed Data View")
+
+                # Calculate aggregate metrics
+                total_spans = len(df)
+                total_tokens = df['total_tokens'].sum()
+
+                # Display aggregate metrics
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Total Spans", f"{total_spans:,}")
+                with col2:
+                    st.metric("Total Tokens", f"{total_tokens:,.2f}M" if total_tokens >= 1e6 else f"{total_tokens:,}")
+
                 # Prepare the data for display
                 display_data = []
                 for _, row in df.iterrows():
@@ -433,10 +462,10 @@ if st.session_state.user:
                         if val >= 80:
                             color = 'green'
                         elif val >= 60:
-                            color = 'yellow'
+                            color = '#90EE90'  # Light green
                         else:
                             color = 'red'
-                        return f'background-color: {color}; color: white'
+                        return f'background-color: {color}; color: black'
                     return ''
 
                 # Apply the styling only to metric columns
@@ -454,8 +483,8 @@ if st.session_state.user:
                     }).set_table_styles([
                         {'selector': 'th', 'props': [('background-color', '#4CAF50'), ('color', 'white')]},
                         {'selector': 'td', 'props': [('text-align', 'left')]},
-                        # Keep background white for Prompt, Context, and Response columns, but text black
-                        {'selector': 'td:nth-child(-n+3)', 'props': [('background-color', 'white !important'), ('color', 'black !important')]}
+                        # Keep background white for non-metric columns
+                        {'selector': 'td:nth-child(-n+3)', 'props': [('background-color', 'white !important')]}
                     ]), 
                     use_container_width=True,
                     height=400  # Set a fixed height with scrolling
