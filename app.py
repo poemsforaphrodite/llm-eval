@@ -461,23 +461,6 @@ if st.session_state.user:
                     height=400  # Set a fixed height with scrolling
                 )
                 
-                # Add an expander for viewing full details of a specific query
-                with st.expander("View Full Details for a Specific Query", expanded=True):
-                    query_number = st.number_input("Enter Query Number", min_value=1, max_value=len(df), value=1, step=1)
-                    if st.button("Show Full Details"):
-                        full_details = df[df['query_number'] == query_number].iloc[0]
-                        st.write(f"**Query Number:** {query_number}")
-                        st.write(f"**Timestamp:** {full_details['timestamp']}")
-                        st.write(f"**Prompt:** {full_details['prompt']}")
-                        st.write(f"**Context:** {full_details['context']}")
-                        st.write(f"**Response:** {full_details['response']}")
-                        st.write("**Metrics:**")
-                        metrics_df = pd.DataFrame({
-                            "Metric": metrics,
-                            "Score": [full_details[metric] for metric in metrics]
-                        })
-                        st.dataframe(metrics_df.style.format({"Score": "{:.2f}%"}))
-
                 # Placeholders for future sections
                 st.subheader("Worst Performing Slice Analysis")
                 st.info("This section will show analysis of the worst-performing data slices.")
