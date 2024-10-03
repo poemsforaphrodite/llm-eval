@@ -15,6 +15,8 @@ import threading  # {{ edit_25: Import threading for background processing }}
 import tiktoken
 from tiktoken.core import Encoding
 from runner import run_model
+from bson.objectid import ObjectId
+import traceback  # Add this import at the top of your file
 
 # Set page configuration to wide mode
 st.set_page_config(layout="wide")
@@ -29,8 +31,11 @@ db = mongo_client['llm_evaluation_system']
 users_collection = db['users']
 results_collection = db['evaluation_results']
 
-# Initialize OpenAI client
-openai_client = OpenAI()  # {{ edit_12: Rename OpenAI client to 'openai_client' }}
+# Remove or comment out this line if it exists
+# openai_client = OpenAI()
+
+# Instead, use the openai_client from runner.py
+from runner import openai_client
 
 # Initialize Pinecone
 pinecone_client = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))  # {{ edit_13: Initialize Pinecone client using Pinecone class }}
@@ -98,11 +103,30 @@ def generate_response(prompt, context):
     except Exception as e:
         st.error(f"Error generating response: {str(e)}")
         return None
+    
+# Add this function to update the context for a model
+def update_model_context(username, model_id, context):
+    users_collection.update_one(
+        {"username": username, "models.model_id": model_id},
+        {"$set": {"models.$.context": context}}
+    )
+
 
 # Function to clear the results database
-def clear_results_database():
+def clear_results_database(username, model_identifier=None):
     try:
-        results_collection.delete_many({})
+        if model_identifier:
+            # Clear results for the specific model
+            results_collection.delete_many({
+                "username": username,
+                "$or": [
+                    {"model_name": model_identifier},
+                    {"model_id": model_identifier}
+                ]
+            })
+        else:
+            # Clear all results for the user
+            results_collection.delete_many({"username": username})
         return True
     except Exception as e:
         st.error(f"Error clearing results database: {str(e)}")
@@ -229,6 +253,46 @@ def save_results(username, model, prompt, context, response, evaluation):  # {{ 
     }
     results_collection.insert_one(result)
 
+# Modify the run_custom_evaluations function
+def run_custom_evaluations(context_dataset, questions, selected_model, username):
+    try:
+        model_name = selected_model['model_name']
+        model_id = selected_model['model_id']
+        
+        # Update the context for this model
+        update_model_context(username, model_id, context_dataset)
+        
+        for question in questions:
+            # Get the student model's response using runner.py (without context)
+            try:
+                answer = run_model(model_name, question)
+                if answer is None or answer == "":
+                    st.warning(f"No response received from the model for question: {question}")
+                    answer = "No response received from the model."
+            except Exception as model_error:
+                st.error(f"Error running model for question: {question}")
+                st.error(f"Error details: {str(model_error)}")
+                answer = f"Error: {str(model_error)}"
+            
+            # Get the teacher's evaluation (with context)
+            try:
+                evaluation = teacher_evaluate(question, context_dataset, answer)
+                if evaluation is None:
+                    st.warning(f"No evaluation received for question: {question}")
+                    evaluation = {"Error": "No evaluation received"}
+            except Exception as eval_error:
+                st.error(f"Error in teacher evaluation for question: {question}")
+                st.error(f"Error details: {str(eval_error)}")
+                evaluation = {"Error": str(eval_error)}
+            
+            # Save the results
+            save_results(username, selected_model, question, context_dataset, answer, evaluation)
+        
+        st.success("Evaluation completed successfully!")
+    except Exception as e:
+        st.error(f"Error in custom evaluation: {str(e)}")
+        st.error(f"Detailed error: {traceback.format_exc()}")
+
 # Function for teacher model evaluation
 def teacher_evaluate(prompt, context, response):
     try:
@@ -237,8 +301,8 @@ def teacher_evaluate(prompt, context, response):
         Rate each factor on a scale of 0 to 1, where 1 is the best (or least problematic for negative factors like Hallucination and Bias).
         Please provide scores with two decimal places, and avoid extreme scores of exactly 0 or 1 unless absolutely necessary.
 
-        Prompt: {prompt}
         Context: {context}
+        Prompt: {prompt}
         Response: {response}
 
         Factors to evaluate:
@@ -331,12 +395,7 @@ else:
         st.session_state.user = None
         st.rerun()
 
-    # Add Clear Results Database button
-    if st.sidebar.button("Clear Results Database"):
-        if clear_results_database():  # {{ edit_fix: Calling the newly defined clear_results_database function }}
-            st.sidebar.success("Results database cleared successfully!")
-        else:
-            st.sidebar.error("Failed to clear results database.")
+
 
 # App content
 if st.session_state.user:
@@ -356,9 +415,23 @@ if st.session_state.user:
         if user_models:
             model_options = [model['model_name'] if model['model_name'] else model['model_id'] for model in user_models]
             selected_model = st.selectbox("Select Model to View Metrics", ["All Models"] + model_options)
+            st.session_state['selected_model'] = selected_model  # Store the selected model in session state
+
+            # Add delete dataset button
+            if selected_model != "All Models":
+                if st.button("Delete Dataset"):
+                    if st.session_state['selected_model']:
+                        if clear_results_database(st.session_state.user, st.session_state['selected_model']):
+                            st.success(f"All evaluation results for {st.session_state['selected_model']} have been deleted.")
+                            st.rerun()  # Rerun the app to refresh the dashboard
+                        else:
+                            st.error("Failed to delete the dataset. Please try again.")
+                    else:
+                        st.error("No model selected. Please select a model to delete its dataset.")
         else:
             st.error("You have no uploaded models.")
             selected_model = "All Models"
+            st.session_state['selected_model'] = selected_model
         
         try:
             query = {"username": st.session_state.user}
@@ -370,17 +443,32 @@ if st.session_state.user:
             if results:
                 df = pd.DataFrame(results)
                 
-                # Count tokens for prompt, context, and response
-                df['prompt_tokens'] = df['prompt'].apply(count_tokens)
-                df['context_tokens'] = df['context'].apply(count_tokens)
-                df['response_tokens'] = df['response'].apply(count_tokens)
+                # Check if required columns exist
+                required_columns = ['prompt', 'context', 'response', 'evaluation']
+                missing_columns = [col for col in required_columns if col not in df.columns]
+                if missing_columns:
+                    st.error(f"Error: Missing columns in the data: {', '.join(missing_columns)}")
+                    st.error("Please check the database schema and ensure all required fields are present.")
+                    st.stop()
+
+                # Safely count tokens for prompt, context, and response
+                def safe_count_tokens(text):
+                    if isinstance(text, str):
+                        return count_tokens(text)
+                    else:
+                        return 0  # or some default value
+
+                df['prompt_tokens'] = df['prompt'].apply(safe_count_tokens)
+                df['context_tokens'] = df['context'].apply(safe_count_tokens)
+                df['response_tokens'] = df['response'].apply(safe_count_tokens)
                 
                 # Calculate total tokens for each row
                 df['total_tokens'] = df['prompt_tokens'] + df['context_tokens'] + df['response_tokens']
                 
+                # Safely extract evaluation metrics
                 metrics = ["Accuracy", "Hallucination", "Groundedness", "Relevance", "Recall", "Precision", "Consistency", "Bias Detection"]
                 for metric in metrics:
-                    df[metric] = df['evaluation'].apply(lambda x: x.get(metric, {}).get('score', 0) if x else 0) * 100
+                    df[metric] = df['evaluation'].apply(lambda x: x.get(metric, {}).get('score', 0) if isinstance(x, dict) else 0) * 100
 
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 df['query_number'] = range(1, len(df) + 1)  # Add query numbers
@@ -444,13 +532,13 @@ if st.session_state.user:
                 display_data = []
                 for _, row in df.iterrows():
                     display_row = {
-                        "Prompt": row['prompt'][:50] + "...",  # Truncate long prompts
-                        "Context": row['context'][:50] + "...",  # Truncate long contexts
-                        "Response": row['response'][:50] + "...",  # Truncate long responses
+                        "Prompt": str(row.get('prompt', ''))[:50] + "..." if row.get('prompt') else "N/A",
+                        "Context": str(row.get('context', ''))[:50] + "..." if row.get('context') else "N/A",
+                        "Response": str(row.get('response', ''))[:50] + "..." if row.get('response') else "N/A",
                     }
                     # Add metrics to the display row
                     for metric in metrics:
-                        display_row[metric] = row[metric]  # Store as float, not string
+                        display_row[metric] = row.get(metric, 0)  # Use get() with a default value
                     
                     display_data.append(display_row)
 
@@ -500,11 +588,10 @@ if st.session_state.user:
             else:
                 st.info("No evaluation results available for the selected model.")
         except Exception as e:
-            st.error(f"Error fetching data from database: {e}")
+            st.error(f"Error processing data from database: {str(e)}")
             st.error("Detailed error information:")
-            st.error(str(e))
-            import traceback
             st.error(traceback.format_exc())
+            st.stop()
 
     elif app_mode == "Model Upload":
         st.title("Upload Your Model")
@@ -585,8 +672,30 @@ if st.session_state.user:
             ...
 
         st.subheader("Input for Model Testing")
-        context_dataset = st.text_area("Enter Context Dataset (txt):", height=200)
-        questions_json = st.text_area("Enter Questions (JSON format):", height=200)
+        
+        # Context Dataset Input
+        context_input_method = st.radio("Choose context input method:", ["Text Input", "File Upload"])
+        if context_input_method == "Text Input":
+            context_dataset = st.text_area("Enter Context Dataset (txt):", height=200)
+        else:
+            context_file = st.file_uploader("Upload Context Dataset", type=["txt"])
+            if context_file is not None:
+                context_dataset = context_file.getvalue().decode("utf-8")
+                st.success("Context file uploaded successfully!")
+            else:
+                context_dataset = None
+
+        # Questions Input
+        questions_input_method = st.radio("Choose questions input method:", ["Text Input", "File Upload"])
+        if questions_input_method == "Text Input":
+            questions_json = st.text_area("Enter Questions (JSON format):", height=200)
+        else:
+            questions_file = st.file_uploader("Upload Questions JSON", type=["json"])
+            if questions_file is not None:
+                questions_json = questions_file.getvalue().decode("utf-8")
+                st.success("Questions file uploaded successfully!")
+            else:
+                questions_json = None
         
         if st.button("Run Test"):
             if not model_name:
@@ -636,23 +745,25 @@ if st.session_state.user:
         
         if model_type == "Simple Model":
             new_model_name = st.text_input("Enter New Model Name:")
-            if st.button("Add Simple Model"):
-                if new_model_name:
+            if st.button("Add Simple Model") or st.button("Add Custom Model"):
+                if new_model_name or selected_custom_model:
                     model_id = f"{st.session_state.user}_model_{int(datetime.now().timestamp())}"
+                    model_data = {
+                        "model_id": model_id,
+                        "model_name": new_model_name if model_type == "Simple Model" else selected_custom_model,
+                        "model_type": "simple" if model_type == "Simple Model" else "custom",
+                        "file_path": None,
+                        "model_link": None,
+                        "uploaded_at": datetime.now(),
+                        "context": None  # We'll update this when running evaluations
+                    }
                     users_collection.update_one(
                         {"username": st.session_state.user},
-                        {"$push": {"models": {
-                            "model_id": model_id,
-                            "model_name": new_model_name,
-                            "model_type": "simple",
-                            "file_path": None,
-                            "model_link": None,
-                            "uploaded_at": datetime.now()
-                        }}}
+                        {"$push": {"models": model_data}}
                     )
-                    st.success(f"Simple Model '{new_model_name}' added successfully as {model_id}!")
+                    st.success(f"Model '{model_data['model_name']}' added successfully as {model_id}!")
                 else:
-                    st.error("Please enter a valid model name.")
+                    st.error("Please enter a valid model name or select a custom model.")
         
         else:  # Custom Model
             custom_model_options = ["gpt-4o", "gpt-4o-mini"]
@@ -760,7 +871,7 @@ if st.session_state.user:
                         'border': '1px solid #ddd'
                     }).set_table_styles([
                         {'selector': 'th', 'props': [('background-color', '#f5f5f5'), ('text-align', 'center')]},
-                        {'selector': 'td', 'props': [('text-align', 'center'), ('vertical-align', 'top')]}
+                        {'selector': 'td', 'props': [('text-align', 'left'), ('vertical-align', 'top')]}
                     ]).format({
                         "Accuracy (%)": "{:.2f}",
                         "Hallucination (%)": "{:.2f}",
@@ -782,14 +893,3 @@ if st.session_state.user:
 # Add a footer
 st.sidebar.markdown("---")
 st.sidebar.info("LLM Evaluation System - v0.2")
-
-# Add this function to handle custom model evaluations
-def run_custom_evaluations(context_dataset, questions, selected_model, username):
-    try:
-        model_name = selected_model['model_name']
-        for question in questions:
-            answer = run_model(model_name, context_dataset, question)
-            evaluation = teacher_evaluate(question, context_dataset, answer)
-            save_results(username, selected_model, question, context_dataset, answer, evaluation)
-    except Exception as e:
-        print(f"Error in custom evaluation: {str(e)}")
