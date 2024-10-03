@@ -1,0 +1,32 @@
+[
+    {
+      "prompt": "What are the common ways to prevent overfitting in machine learning?"
+    },
+    {
+      "prompt": "Describe the role of a learning rate in gradient descent optimization."
+    },
+    {
+      "prompt": "Summarize the key concepts of data structures mentioned in Chapter 2."
+    },
+    {
+      "prompt": "Explain the difference between procedural programming and object-oriented programming as described in Chapter 4."
+    },
+    {
+      "prompt": "What are the primary functions of an operating system according to Chapter 5?"
+    },
+    {
+      "prompt": "Compare and contrast relational databases and NoSQL databases based on the information in Chapter 6."
+    },
+    {
+      "prompt": "Describe the TCP/IP model layers as outlined in Chapter 7."
+    },
+    {
+      "prompt": "What are the main areas of Artificial Intelligence research mentioned in Chapter 8?"
+    },
+    {
+      "prompt": "List and briefly explain the key stages of software development discussed in Chapter 9."
+    },
+    {
+      "prompt": "How does Chapter 1 define computer science and its core focus?"
+    }
+  ]
