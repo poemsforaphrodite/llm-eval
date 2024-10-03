@@ -17,6 +17,9 @@ from tiktoken.core import Encoding
 from runner import run_model
 from bson.objectid import ObjectId
 import traceback  # Add this import at the top of your file
+import umap
+import plotly.graph_objs as go
+from sklearn.preprocessing import StandardScaler
 
 # Set page configuration to wide mode
 st.set_page_config(layout="wide")
@@ -579,12 +582,90 @@ if st.session_state.user:
                     height=400  # Set a fixed height with scrolling
                 )
                 
+                # 3D UMAP Visualization
+                st.subheader("3D UMAP Visualization")
+                
+                if len(df) > 2:  # Ensure we have at least 3 data points for 3D UMAP
+                    # Prepare data for UMAP
+                    features = ['Accuracy', 'Hallucination', 'Groundedness', 'Relevance', 'Recall', 'Precision', 'Consistency', 'Bias Detection']
+                    X = df[features].values
+                    
+                    # Normalize the data
+                    scaler = StandardScaler()
+                    X_scaled = scaler.fit_transform(X)
+                    
+                    # Perform UMAP dimensionality reduction to 3D
+                    reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=3, random_state=42)
+                    embedding = reducer.fit_transform(X_scaled)
+                    
+                    # Create a DataFrame with the UMAP results
+                    umap_df = pd.DataFrame({
+                        'UMAP1': embedding[:, 0],
+                        'UMAP2': embedding[:, 1],
+                        'UMAP3': embedding[:, 2],
+                        'Model': df['model_name'],
+                        'Prompt': df['prompt']
+                    })
+                    
+                    # Create the 3D UMAP scatter plot
+                    fig = go.Figure()
+                    
+                    for model in umap_df['Model'].unique():
+                        model_data = umap_df[umap_df['Model'] == model]
+                        fig.add_trace(go.Scatter3d(
+                            x=model_data['UMAP1'],
+                            y=model_data['UMAP2'],
+                            z=model_data['UMAP3'],
+                            mode='markers',
+                            name=model,
+                            text=model_data['Prompt'],
+                            hoverinfo='text+name',
+                            marker=dict(size=5, opacity=0.7)
+                        ))
+                    
+                    fig.update_layout(
+                        title='3D UMAP Visualization of Model Evaluations',
+                        scene=dict(
+                            xaxis_title='UMAP Dimension 1',
+                            yaxis_title='UMAP Dimension 2',
+                            zaxis_title='UMAP Dimension 3'
+                        ),
+                        hovermode='closest',
+                        template='plotly_dark',
+                        height=800,
+                        legend_title='Models'
+                    )
+                    
+                    # Display the 3D UMAP plot
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    st.info("This 3D UMAP visualization shows the distribution of evaluation results in a 3D space. " 
+                            "Each point represents an evaluation, with different colors indicating different models. " 
+                            "Hover over points to see the corresponding prompts. You can rotate and zoom the plot for better exploration.")
+                    
+                    # Add explanation of 3D UMAP plot
+                    st.markdown("""
+                    ### Interpreting the 3D UMAP Visualization:
+                    
+                    - **Clustering**: Points that are close together in the 3D space represent evaluations with similar characteristics across all metrics.
+                    - **Outliers**: Points that are far from other points may represent unique or unusual evaluations.
+                    - **Model Comparison**: If points of different colors (models) are well-separated, it suggests that the models perform differently across the evaluation metrics.
+                    - **Prompt Similarity**: Hovering over points allows you to see the prompts. Similar prompts might cluster together if they result in similar evaluation metrics.
+                    - **Dimensionality**: The third dimension allows for more nuanced separation of data points, potentially revealing patterns not visible in 2D.
+                    
+                    Interact with the plot by:
+                    - Rotating: Click and drag to rotate the 3D space.
+                    - Zooming: Use the scroll wheel or pinch gesture to zoom in/out.
+                    - Panning: Right-click and drag (or two-finger drag on touchpads) to pan the view.
+                    
+                    This visualization helps in identifying patterns, trends, and potential areas for improvement in your model evaluations with an additional dimension for more detailed analysis.
+                    """)
+                else:
+                    st.info("Not enough data for 3D UMAP visualization. Please run at least 3 evaluations.")
+
                 # Placeholders for future sections
                 st.subheader("Worst Performing Slice Analysis")
                 st.info("This section will show analysis of the worst-performing data slices.")
-                
-                st.subheader("UMAP Visualization")
-                st.info("This section will contain UMAP visualizations for dimensionality reduction insights.")
             else:
                 st.info("No evaluation results available for the selected model.")
         except Exception as e:
