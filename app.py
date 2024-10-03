@@ -255,7 +255,7 @@ def teacher_evaluate(prompt, context, response):
         """
 
         evaluation_response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",  # Corrected model name
+            model="gpt-4o-mini",  
             messages=[
                 {"role": "system", "content": "You are an expert evaluator of language model responses."},
                 {"role": "user", "content": evaluation_prompt}
@@ -328,7 +328,7 @@ else:
     st.sidebar.success(f"Welcome, {st.session_state.user}!")
     if st.sidebar.button("Logout"):
         st.session_state.user = None
-        st.experimental_rerun()
+        st.rerun()
 
     # Add Clear Results Database button
     if st.sidebar.button("Clear Results Database"):
@@ -562,7 +562,6 @@ if st.session_state.user:
     elif app_mode == "Prompt Testing":
         st.title("Prompt Testing")
         
-        # {{ edit_6: Use model_name instead of model_id }}
         model_selection_option = st.radio("Select Model Option:", ["Choose Existing Model", "Add New Model"])
         
         if model_selection_option == "Choose Existing Model":
@@ -572,8 +571,15 @@ if st.session_state.user:
             if not user_models:
                 st.error("You have no uploaded models. Please upload a model first.")
             else:
-                # Display model_name instead of model_id
-                model_name = st.selectbox("Select a Model for Testing", [model['model_name'] if model['model_name'] else model['model_id'] for model in user_models])
+                # Display model_name and model_type, handling cases where model_type might not exist
+                model_options = [
+                    f"{model['model_name']} ({model.get('model_type', 'Unknown').capitalize()})" 
+                    for model in user_models
+                ]
+                selected_model = st.selectbox("Select a Model for Testing", model_options)
+                
+                # Extract model_name from the selected option
+                model_name = selected_model.split(" (")[0]
         else:
             # Option to enter model name or upload a link
             new_model_option = st.radio("Add Model By:", ["Enter Model Name", "Upload Model Link"])
@@ -582,40 +588,40 @@ if st.session_state.user:
                 model_name_input = st.text_input("Enter New Model Name:")
                 if st.button("Save Model Name"):
                     if model_name_input:
-                        # {{ edit_3: Save the new model name to user's models }}
                         model_id = f"{st.session_state.user}_model_{int(datetime.now().timestamp())}"
                         users_collection.update_one(
                             {"username": st.session_state.user},
                             {"$push": {"models": {
                                 "model_id": model_id,
                                 "model_name": model_name_input,
+                                "model_type": "simple",
                                 "file_path": None,
                                 "model_link": None,
                                 "uploaded_at": datetime.now()
                             }}}
                         )
                         st.success(f"Model '{model_name_input}' saved successfully as {model_id}!")
-                        model_name = model_name_input  # Use model_name instead of model_id
+                        model_name = model_name_input
                     else:
                         st.error("Please enter a valid model name.")
             else:
                 model_link = st.text_input("Enter Model Link:")
                 if st.button("Save Model Link"):
                     if model_link:
-                        # {{ edit_4: Save the model link to user's models }}
                         model_id = f"{st.session_state.user}_model_{int(datetime.now().timestamp())}"
                         users_collection.update_one(
                             {"username": st.session_state.user},
                             {"$push": {"models": {
                                 "model_id": model_id,
                                 "model_name": None,
+                                "model_type": "custom",
                                 "file_path": None,
                                 "model_link": model_link,
                                 "uploaded_at": datetime.now()
                             }}}
                         )
                         st.success(f"Model link saved successfully as {model_id}!")
-                        model_name = model_id  # Use model_id if model_name is not available
+                        model_name = model_id
                     else:
                         st.error("Please enter a valid model link.")
         
@@ -712,13 +718,21 @@ if st.session_state.user:
             st.stop()
         user_models = user.get("models", [])
         
-        # {{ edit_1: Add option to add a new model }}
-        st.subheader("Add a New Model")
-        add_model_option = st.radio("Add Model By:", ["Enter Model Name", "Upload Model Link"])
+        # Update existing models to ensure they have a model_type
+        for model in user_models:
+            if 'model_type' not in model:
+                model['model_type'] = 'simple'  # Default to 'simple' for existing models
+        users_collection.update_one(
+            {"username": st.session_state.user},
+            {"$set": {"models": user_models}}
+        )
         
-        if add_model_option == "Enter Model Name":
+        st.subheader("Add a New Model")
+        model_type = st.radio("Select Model Type:", ["Simple Model", "Custom Model"])
+        
+        if model_type == "Simple Model":
             new_model_name = st.text_input("Enter New Model Name:")
-            if st.button("Add Model Name"):
+            if st.button("Add Simple Model"):
                 if new_model_name:
                     model_id = f"{st.session_state.user}_model_{int(datetime.now().timestamp())}"
                     users_collection.update_one(
@@ -726,32 +740,34 @@ if st.session_state.user:
                         {"$push": {"models": {
                             "model_id": model_id,
                             "model_name": new_model_name,
+                            "model_type": "simple",
                             "file_path": None,
                             "model_link": None,
                             "uploaded_at": datetime.now()
                         }}}
                     )
-                    st.success(f"Model '{new_model_name}' added successfully as {model_id}!")
+                    st.success(f"Simple Model '{new_model_name}' added successfully as {model_id}!")
                 else:
                     st.error("Please enter a valid model name.")
-        else:
-            new_model_link = st.text_input("Enter Model Link:")
-            if st.button("Add Model Link"):
-                if new_model_link:
-                    model_id = f"{st.session_state.user}_model_{int(datetime.now().timestamp())}"
-                    users_collection.update_one(
-                        {"username": st.session_state.user},
-                        {"$push": {"models": {
-                            "model_id": model_id,
-                            "model_name": None,
-                            "file_path": None,
-                            "model_link": new_model_link,
-                            "uploaded_at": datetime.now()
-                        }}}
-                    )
-                    st.success(f"Model link added successfully as {model_id}!")
-                else:
-                    st.error("Please enter a valid model link.")
+        
+        else:  # Custom Model
+            custom_model_options = ["gpt-4o", "gpt-4o-mini"]
+            selected_custom_model = st.selectbox("Select Custom Model:", custom_model_options)
+            
+            if st.button("Add Custom Model"):
+                model_id = f"{st.session_state.user}_model_{int(datetime.now().timestamp())}"
+                users_collection.update_one(
+                    {"username": st.session_state.user},
+                    {"$push": {"models": {
+                        "model_id": model_id,
+                        "model_name": selected_custom_model,
+                        "model_type": "custom",
+                        "file_path": None,
+                        "model_link": None,
+                        "uploaded_at": datetime.now()
+                    }}}
+                )
+                st.success(f"Custom Model '{selected_custom_model}' added successfully as {model_id}!")
         
         st.markdown("---")
         
@@ -759,11 +775,9 @@ if st.session_state.user:
             st.subheader("Your Models")
             for model in user_models:
                 st.markdown(f"**Model ID:** {model['model_id']}")
-                st.write(f"**Model Type:** {model.get('model_type', 'custom').capitalize()}")  # {{ edit_14: Handle missing 'model_type' with default 'custom' }}
+                st.write(f"**Model Type:** {model.get('model_type', 'simple').capitalize()}")
                 if model.get("model_name"):
                     st.write(f"**Model Name:** {model['model_name']}")
-                if model.get("model_link"):
-                    st.write(f"**Model Link:** [Link]({model['model_link']})")
                 if model.get("file_path"):
                     st.write(f"**File Path:** {model['file_path']}")
                 st.write(f"**Uploaded at:** {model['uploaded_at']}")
