@@ -20,6 +20,17 @@ import traceback  # Add this import at the top of your file
 import umap
 import plotly.graph_objs as go
 from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+import plotly.colors as plc
+
+# Add this helper function at the beginning of your file
+def extract_prompt_text(prompt):
+    if isinstance(prompt, dict):
+        return prompt.get('prompt', '')
+    elif isinstance(prompt, str):
+        return prompt
+    else:
+        return str(prompt)
 
 # Set page configuration to wide mode
 st.set_page_config(layout="wide")
@@ -266,30 +277,33 @@ def run_custom_evaluations(context_dataset, questions, selected_model, username)
         update_model_context(username, model_id, context_dataset)
         
         for question in questions:
+            # Ensure that 'prompt_text' is a string
+            prompt_text = extract_prompt_text(question)
+            
             # Get the student model's response using runner.py (without context)
             try:
-                answer = run_model(model_name, question)
+                answer = run_model(model_name, prompt_text)
                 if answer is None or answer == "":
-                    st.warning(f"No response received from the model for question: {question}")
+                    st.warning(f"No response received from the model for question: {prompt_text}")
                     answer = "No response received from the model."
             except Exception as model_error:
-                st.error(f"Error running model for question: {question}")
+                st.error(f"Error running model for question: {prompt_text}")
                 st.error(f"Error details: {str(model_error)}")
                 answer = f"Error: {str(model_error)}"
             
             # Get the teacher's evaluation (with context)
             try:
-                evaluation = teacher_evaluate(question, context_dataset, answer)
+                evaluation = teacher_evaluate(prompt_text, context_dataset, answer)
                 if evaluation is None:
-                    st.warning(f"No evaluation received for question: {question}")
+                    st.warning(f"No evaluation received for question: {prompt_text}")
                     evaluation = {"Error": "No evaluation received"}
             except Exception as eval_error:
-                st.error(f"Error in teacher evaluation for question: {question}")
+                st.error(f"Error in teacher evaluation for question: {prompt_text}")
                 st.error(f"Error details: {str(eval_error)}")
                 evaluation = {"Error": str(eval_error)}
             
             # Save the results
-            save_results(username, selected_model, question, context_dataset, answer, evaluation)
+            save_results(username, selected_model, prompt_text, context_dataset, answer, evaluation)
         
         st.success("Evaluation completed successfully!")
     except Exception as e:
@@ -454,6 +468,9 @@ if st.session_state.user:
                     st.error("Please check the database schema and ensure all required fields are present.")
                     st.stop()
 
+                # Extract prompt text if needed
+                df['prompt'] = df['prompt'].apply(extract_prompt_text)
+
                 # Safely count tokens for prompt, context, and response
                 def safe_count_tokens(text):
                     if isinstance(text, str):
@@ -476,6 +493,48 @@ if st.session_state.user:
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 df['query_number'] = range(1, len(df) + 1)  # Add query numbers
                 
+                # Set the threshold for notifications
+                notification_threshold = st.slider("Set Performance Threshold for Notifications (%)", min_value=0, max_value=100, value=50)
+
+                # Define the metrics to check
+                metrics_to_check = metrics  # Or allow the user to select specific metrics
+
+                # Check for evaluations where any of the metrics are below the threshold
+                low_performance_mask = df[metrics_to_check].lt(notification_threshold).any(axis=1)
+                low_performing_evaluations = df[low_performance_mask]
+
+                # Display Notifications
+                if not low_performing_evaluations.empty:
+                    st.warning(f"⚠️ You have {len(low_performing_evaluations)} evaluations with metrics below {notification_threshold}%.")
+                    with st.expander("View Low-Performing Evaluations"):
+                        # Display the low-performing evaluations in a table
+                        display_columns = ['timestamp', 'model_name', 'prompt', 'response'] + metrics_to_check
+                        low_perf_display_df = low_performing_evaluations[display_columns].copy()
+                        low_perf_display_df['timestamp'] = low_perf_display_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        # Apply styling to highlight low scores
+                        def highlight_low_scores(val):
+                            if isinstance(val, float):
+                                if val < notification_threshold:
+                                    return 'background-color: red; color: white'
+                            return ''
+                        
+                        styled_low_perf_df = low_perf_display_df.style.applymap(highlight_low_scores, subset=metrics_to_check)
+                        styled_low_perf_df = styled_low_perf_df.format({metric: "{:.2f}%" for metric in metrics_to_check})
+                        
+                        st.dataframe(
+                            styled_low_perf_df.set_properties(**{
+                                'text-align': 'left',
+                                'border': '1px solid #ddd'
+                            }).set_table_styles([
+                                {'selector': 'th', 'props': [('background-color', '#333'), ('color', 'white')]},
+                                {'selector': 'td', 'props': [('vertical-align', 'top')]}
+                            ]), 
+                            use_container_width=True
+                        )
+                else:
+                    st.success("🎉 All your evaluations have metrics above the threshold!")
+
                 @st.cache_data
                 def create_metrics_graph(df, metrics):
                     fig = px.line(
@@ -534,8 +593,9 @@ if st.session_state.user:
                 # Prepare the data for display
                 display_data = []
                 for _, row in df.iterrows():
+                    prompt_text = extract_prompt_text(row.get('prompt', ''))
                     display_row = {
-                        "Prompt": str(row.get('prompt', ''))[:50] + "..." if row.get('prompt') else "N/A",
+                        "Prompt": prompt_text[:50] + "..." if prompt_text else "N/A",
                         "Context": str(row.get('context', ''))[:50] + "..." if row.get('context') else "N/A",
                         "Response": str(row.get('response', ''))[:50] + "..." if row.get('response') else "N/A",
                     }
@@ -582,90 +642,302 @@ if st.session_state.user:
                     height=400  # Set a fixed height with scrolling
                 )
                 
-                # 3D UMAP Visualization
-                st.subheader("3D UMAP Visualization")
-                
-                if len(df) > 2:  # Ensure we have at least 3 data points for 3D UMAP
-                    # Prepare data for UMAP
-                    features = ['Accuracy', 'Hallucination', 'Groundedness', 'Relevance', 'Recall', 'Precision', 'Consistency', 'Bias Detection']
-                    X = df[features].values
-                    
-                    # Normalize the data
-                    scaler = StandardScaler()
-                    X_scaled = scaler.fit_transform(X)
-                    
-                    # Perform UMAP dimensionality reduction to 3D
-                    reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=3, random_state=42)
-                    embedding = reducer.fit_transform(X_scaled)
-                    
-                    # Create a DataFrame with the UMAP results
-                    umap_df = pd.DataFrame({
-                        'UMAP1': embedding[:, 0],
-                        'UMAP2': embedding[:, 1],
-                        'UMAP3': embedding[:, 2],
-                        'Model': df['model_name'],
-                        'Prompt': df['prompt']
-                    })
-                    
-                    # Create the 3D UMAP scatter plot
-                    fig = go.Figure()
-                    
-                    for model in umap_df['Model'].unique():
-                        model_data = umap_df[umap_df['Model'] == model]
-                        fig.add_trace(go.Scatter3d(
-                            x=model_data['UMAP1'],
-                            y=model_data['UMAP2'],
-                            z=model_data['UMAP3'],
-                            mode='markers',
-                            name=model,
-                            text=model_data['Prompt'],
-                            hoverinfo='text+name',
-                            marker=dict(size=5, opacity=0.7)
-                        ))
-                    
-                    fig.update_layout(
-                        title='3D UMAP Visualization of Model Evaluations',
-                        scene=dict(
-                            xaxis_title='UMAP Dimension 1',
-                            yaxis_title='UMAP Dimension 2',
-                            zaxis_title='UMAP Dimension 3'
-                        ),
-                        hovermode='closest',
-                        template='plotly_dark',
-                        height=800,
-                        legend_title='Models'
-                    )
-                    
-                    # Display the 3D UMAP plot
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    st.info("This 3D UMAP visualization shows the distribution of evaluation results in a 3D space. " 
-                            "Each point represents an evaluation, with different colors indicating different models. " 
-                            "Hover over points to see the corresponding prompts. You can rotate and zoom the plot for better exploration.")
-                    
-                    # Add explanation of 3D UMAP plot
-                    st.markdown("""
-                    ### Interpreting the 3D UMAP Visualization:
-                    
-                    - **Clustering**: Points that are close together in the 3D space represent evaluations with similar characteristics across all metrics.
-                    - **Outliers**: Points that are far from other points may represent unique or unusual evaluations.
-                    - **Model Comparison**: If points of different colors (models) are well-separated, it suggests that the models perform differently across the evaluation metrics.
-                    - **Prompt Similarity**: Hovering over points allows you to see the prompts. Similar prompts might cluster together if they result in similar evaluation metrics.
-                    - **Dimensionality**: The third dimension allows for more nuanced separation of data points, potentially revealing patterns not visible in 2D.
-                    
-                    Interact with the plot by:
-                    - Rotating: Click and drag to rotate the 3D space.
-                    - Zooming: Use the scroll wheel or pinch gesture to zoom in/out.
-                    - Panning: Right-click and drag (or two-finger drag on touchpads) to pan the view.
-                    
-                    This visualization helps in identifying patterns, trends, and potential areas for improvement in your model evaluations with an additional dimension for more detailed analysis.
-                    """)
-                else:
-                    st.info("Not enough data for 3D UMAP visualization. Please run at least 3 evaluations.")
+                # UMAP Visualization with Clustering
+                st.subheader("UMAP Visualization with Clustering")
 
-                # Placeholders for future sections
+                if len(df) > 2:
+                    # Allow user to select metrics to include
+                    metrics = ['Accuracy', 'Hallucination', 'Groundedness', 'Relevance', 'Recall', 'Precision', 'Consistency', 'Bias Detection']
+                    selected_metrics = st.multiselect("Select Metrics to Include in UMAP", metrics, default=metrics)
+
+                    if len(selected_metrics) < 2:
+                        st.warning("Please select at least two metrics for UMAP.")
+                    else:
+                        # Allow user to select number of dimensions
+                        n_components = st.radio("Select UMAP Dimensions", [2, 3], index=1)
+
+                        # Allow user to adjust UMAP parameters
+                        n_neighbors = st.slider("n_neighbors", min_value=2, max_value=50, value=15)
+                        min_dist = st.slider("min_dist", min_value=0.0, max_value=1.0, value=0.1, step=0.01)
+
+                        # Prepare data for UMAP
+                        X = df[selected_metrics].values
+
+                        # Normalize the data
+                        scaler = StandardScaler()
+                        X_scaled = scaler.fit_transform(X)
+
+                        # Perform UMAP dimensionality reduction
+                        reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, n_components=n_components, random_state=42)
+                        embedding = reducer.fit_transform(X_scaled)
+
+                        # Allow user to select the number of clusters
+                        num_clusters = st.slider("Select Number of Clusters", min_value=2, max_value=10, value=3)
+
+                        # Perform KMeans clustering on the UMAP embeddings
+                        kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+                        cluster_labels = kmeans.fit_predict(embedding)
+
+                        # Create a DataFrame with the UMAP results and cluster labels
+                        umap_columns = [f'UMAP{i+1}' for i in range(n_components)]
+                        umap_data = {col: embedding[:, idx] for idx, col in enumerate(umap_columns)}
+                        umap_data['Cluster'] = cluster_labels
+                        umap_data['Model'] = df['model_name']
+                        umap_data['Prompt'] = df['prompt']
+                        umap_data['Response'] = df['response']
+                        umap_data['Timestamp'] = df['timestamp']
+                        umap_df = pd.DataFrame(umap_data)
+
+                        # Include selected metrics in umap_df for hover info
+                        for metric in selected_metrics:
+                            umap_df[metric] = df[metric]
+
+                        # Prepare customdata for hovertemplate
+                        customdata_columns = ['Model', 'Prompt', 'Cluster'] + selected_metrics
+                        umap_df['customdata'] = umap_df[customdata_columns].values.tolist()
+
+                        # Build hovertemplate
+                        hovertemplate = '<b>Model:</b> %{customdata[0]}<br>' + \
+                                        '<b>Prompt:</b> %{customdata[1]}<br>' + \
+                                        '<b>Cluster:</b> %{customdata[2]}<br>'
+                        for idx, metric in enumerate(selected_metrics):
+                            hovertemplate += f'<b>{metric}:</b> %{{customdata[{idx+3}]:.2f}}<br>'
+                        hovertemplate += '<extra></extra>'  # Hide trace info
+
+                        # Define color palette for clusters
+                        cluster_colors = plc.qualitative.Plotly
+                        num_colors = len(cluster_colors)
+                        if num_clusters > num_colors:
+                            cluster_colors = plc.sample_colorscale('Rainbow', [n/(num_clusters-1) for n in range(num_clusters)])
+                        else:
+                            cluster_colors = cluster_colors[:num_clusters]
+
+                        # Map cluster labels to colors
+                        cluster_color_map = {label: color for label, color in zip(range(num_clusters), cluster_colors)}
+                        umap_df['Color'] = umap_df['Cluster'].map(cluster_color_map)
+
+                        # Create the UMAP plot
+                        if n_components == 3:
+                            # 3D plot
+                            fig = go.Figure()
+
+                            for cluster_label in sorted(umap_df['Cluster'].unique()):
+                                cluster_data = umap_df[umap_df['Cluster'] == cluster_label]
+                                fig.add_trace(go.Scatter3d(
+                                    x=cluster_data['UMAP1'],
+                                    y=cluster_data['UMAP2'],
+                                    z=cluster_data['UMAP3'],
+                                    mode='markers',
+                                    name=f'Cluster {cluster_label}',
+                                    marker=dict(
+                                        size=5,
+                                        color=cluster_data['Color'],  # Color according to cluster
+                                        opacity=0.8,
+                                        line=dict(width=0.5, color='white')
+                                    ),
+                                    customdata=cluster_data['customdata'],
+                                    hovertemplate=hovertemplate
+                                ))
+
+                            fig.update_layout(
+                                title='3D UMAP Visualization with Clustering',
+                                scene=dict(
+                                    xaxis_title='UMAP Dimension 1',
+                                    yaxis_title='UMAP Dimension 2',
+                                    zaxis_title='UMAP Dimension 3'
+                                ),
+                                hovermode='closest',
+                                template='plotly_dark',
+                                height=800,
+                                legend_title='Clusters'
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            # 2D plot
+                            fig = go.Figure()
+
+                            for cluster_label in sorted(umap_df['Cluster'].unique()):
+                                cluster_data = umap_df[umap_df['Cluster'] == cluster_label]
+                                fig.add_trace(go.Scatter(
+                                    x=cluster_data['UMAP1'],
+                                    y=cluster_data['UMAP2'],
+                                    mode='markers',
+                                    name=f'Cluster {cluster_label}',
+                                    marker=dict(
+                                        size=8,
+                                        color=cluster_data['Color'],  # Color according to cluster
+                                        opacity=0.8,
+                                        line=dict(width=0.5, color='white')
+                                    ),
+                                    customdata=cluster_data['customdata'],
+                                    hovertemplate=hovertemplate
+                                ))
+
+                            fig.update_layout(
+                                title='2D UMAP Visualization with Clustering',
+                                xaxis_title='UMAP Dimension 1',
+                                yaxis_title='UMAP Dimension 2',
+                                hovermode='closest',
+                                template='plotly_dark',
+                                height=800,
+                                legend_title='Clusters'
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+
+                        # Selectable Data Points
+                        st.subheader("Cluster Analysis")
+
+                        # Show cluster counts
+                        cluster_counts = umap_df['Cluster'].value_counts().sort_index().reset_index()
+                        cluster_counts.columns = ['Cluster', 'Number of Points']
+                        st.write("### Cluster Summary")
+                        st.dataframe(cluster_counts)
+
+                        # Allow user to select clusters to view details
+                        selected_clusters = st.multiselect("Select Clusters to View Details", options=sorted(umap_df['Cluster'].unique()), default=sorted(umap_df['Cluster'].unique()))
+
+                        if selected_clusters:
+                            selected_data = umap_df[umap_df['Cluster'].isin(selected_clusters)]
+                            st.write("### Details of Selected Clusters")
+                            st.dataframe(selected_data[['Model', 'Prompt', 'Response', 'Cluster'] + selected_metrics])
+                        else:
+                            st.info("Select clusters to view their details.")
+
+                        st.info("""
+                        **UMAP Visualization with Clustering**
+
+                        This visualization includes clustering of the evaluation data points in the UMAP space.
+
+                        **Features:**
+
+                        - **Clustering Algorithm**: KMeans clustering is applied on the UMAP embeddings.
+                        - **Cluster Selection**: Choose the number of clusters to identify patterns in the data.
+                        - **Color Coding**: Each cluster is represented by a distinct color in the plot.
+                        - **Interactive Exploration**: Hover over points to see detailed information, including the cluster label.
+                        - **Cluster Analysis**: View summary statistics and details of selected clusters.
+
+                        **Instructions:**
+
+                        - **Select Metrics**: Choose which evaluation metrics to include in the UMAP calculation.
+                        - **Adjust UMAP Parameters**: Fine-tune `n_neighbors` and `min_dist` for clustering granularity.
+                        - **Choose Number of Clusters**: Use the slider to set how many clusters to identify.
+                        - **Interact with the Plot**: Hover and click on clusters to explore data points.
+
+                        **Interpreting Clusters:**
+
+                        - **Cluster Composition**: Clusters group evaluations with similar metric profiles.
+                        - **Model Performance**: Analyze clusters to identify strengths and weaknesses of models.
+                        - **Data Patterns**: Use clustering to uncover hidden patterns in your evaluation data.
+
+                        **Tips:**
+
+                        - Experiment with different numbers of clusters to find meaningful groupings.
+                        - Adjust UMAP parameters to see how the clustering changes with different embeddings.
+                        - Use the cluster details to investigate specific evaluations and prompts.
+
+                        Enjoy exploring your evaluation data with clustering!
+                        """)
+                else:
+                    st.info("Not enough data for UMAP visualization. Please run more evaluations.")
+
+                # Worst Performing Slice Analysis
                 st.subheader("Worst Performing Slice Analysis")
-                st.info("This section will show analysis of the worst-performing data slices.")
+
+                # Allow the user to select metrics to analyze
+                metrics = ['Accuracy', 'Hallucination', 'Groundedness', 'Relevance', 'Recall', 'Precision', 'Consistency', 'Bias Detection']
+                selected_metrics = st.multiselect("Select Metrics to Analyze", metrics, default=metrics)
+
+                if selected_metrics:
+                    # Set a threshold for "poor performance"
+                    threshold = st.slider("Performance Threshold (%)", min_value=0, max_value=100, value=50)
+
+                    # Filter data where any of the selected metrics are below the threshold
+                    mask = df[selected_metrics].lt(threshold).any(axis=1)
+                    worst_performing_df = df[mask]
+
+                    if not worst_performing_df.empty:
+                        st.write(f"Found {len(worst_performing_df)} evaluations below the threshold of {threshold}% in the selected metrics.")
+
+                        # Display the worst-performing prompts and their metrics
+                        st.write("### Worst Performing Evaluations")
+                        display_columns = ['prompt', 'response'] + selected_metrics + ['timestamp']
+                        worst_performing_display_df = worst_performing_df[display_columns].copy()
+                        worst_performing_display_df['timestamp'] = worst_performing_display_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        # Apply styling to highlight low scores
+                        def highlight_low_scores(val):
+                            if isinstance(val, float):
+                                if val < threshold:
+                                    return 'background-color: red; color: white'
+                            return ''
+                        
+                        styled_worst_df = worst_performing_display_df.style.applymap(highlight_low_scores, subset=selected_metrics)
+                        styled_worst_df = styled_worst_df.format({metric: "{:.2f}%" for metric in selected_metrics})
+
+                        st.dataframe(
+                            styled_worst_df.set_properties(**{
+                                'text-align': 'left',
+                                'border': '1px solid #ddd'
+                            }).set_table_styles([
+                                {'selector': 'th', 'props': [('background-color', '#333'), ('color', 'white')]},
+                                {'selector': 'td', 'props': [('vertical-align', 'top')]}
+                            ]), 
+                            use_container_width=True
+                        )
+
+                        # Analyze the worst-performing slices based on prompt characteristics
+                        st.write("### Analysis by Prompt Length")
+
+                        # Add a column for prompt length
+                        worst_performing_df['Prompt Length'] = worst_performing_df['prompt'].apply(lambda x: len(x.split()))
+
+                        # Define bins for prompt length ranges
+                        bins = [0, 5, 10, 20, 50, 100, 1000]
+                        labels = ['0-5', '6-10', '11-20', '21-50', '51-100', '100+']
+                        worst_performing_df['Prompt Length Range'] = pd.cut(worst_performing_df['Prompt Length'], bins=bins, labels=labels, right=False)
+
+                        # Group by 'Prompt Length Range' and calculate average metrics
+                        group_metrics = worst_performing_df.groupby('Prompt Length Range')[selected_metrics].mean().reset_index()
+
+                        # Display the average metrics per prompt length range
+                        st.write("#### Average Metrics per Prompt Length Range")
+                        group_metrics = group_metrics.sort_values('Prompt Length Range')
+                        st.dataframe(group_metrics.style.format({metric: "{:.2f}%" for metric in selected_metrics}))
+
+                        # Visualization of average metrics per prompt length range
+                        st.write("#### Visualization of Metrics by Prompt Length Range")
+                        melted_group_metrics = group_metrics.melt(id_vars='Prompt Length Range', value_vars=selected_metrics, var_name='Metric', value_name='Average Score')
+                        fig = px.bar(
+                            melted_group_metrics, 
+                            x='Prompt Length Range', 
+                            y='Average Score', 
+                            color='Metric', 
+                            barmode='group',
+                            title='Average Metric Scores by Prompt Length Range',
+                            labels={'Average Score': 'Average Score (%)'},
+                            height=600
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        # Further analysis: show counts of worst-performing evaluations per model
+                        st.write("### Worst Performing Evaluations per Model")
+                        model_counts = worst_performing_df['model_name'].value_counts().reset_index()
+                        model_counts.columns = ['Model Name', 'Count of Worst Evaluations']
+                        st.dataframe(model_counts)
+
+                        # Allow user to download the worst-performing data
+                        csv = worst_performing_df.to_csv(index=False)
+                        st.download_button(
+                            label="Download Worst Performing Data as CSV",
+                            data=csv,
+                            file_name='worst_performing_data.csv',
+                            mime='text/csv',
+                        )
+                    else:
+                        st.info("No evaluations found below the specified threshold.")
+                else:
+                    st.warning("Please select at least one metric to analyze.")
+
             else:
                 st.info("No evaluation results available for the selected model.")
         except Exception as e:
@@ -903,6 +1175,9 @@ if st.session_state.user:
             if user_results:
                 # Convert results to a pandas DataFrame
                 df = pd.DataFrame(user_results)
+                
+                # Extract prompt text using the helper function
+                df['prompt'] = df['prompt'].apply(extract_prompt_text)
                 
                 # Normalize the evaluation JSON into separate columns
                 eval_df = df['evaluation'].apply(pd.Series)
