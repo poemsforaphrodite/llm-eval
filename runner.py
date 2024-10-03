@@ -9,7 +9,6 @@ load_dotenv()
 openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
 def run_gpt4o_mini(question):
-    #print(f"Running GPT-4o-mini with question: {question}")
     try:
         # Check if the question is a dictionary and extract the prompt
         if isinstance(question, dict) and 'prompt' in question:
@@ -24,7 +23,26 @@ def run_gpt4o_mini(question):
                 {"role": "user", "content": question_text}
             ]
         )
-        #print(f"Response from GPT-4o-mini: {response.choices[0].message.content}")
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"Error running GPT-4o-mini: {str(e)}")
+        return None
+
+def run_gpt4o(question):
+    try:
+        # Check if the question is a dictionary and extract the prompt
+        if isinstance(question, dict) and 'prompt' in question:
+            question_text = question['prompt']
+        else:
+            question_text = str(question)
+
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant. Answer the question to the best of your ability."},
+                {"role": "user", "content": question_text}
+            ]
+        )
         return response.choices[0].message.content
     except Exception as e:
         print(f"Error running GPT-4o-mini: {str(e)}")
@@ -39,7 +57,6 @@ def run_model(model_name, question):
     if model_name == "gpt-4o-mini":
         return run_gpt4o_mini(question)
     elif model_name == "gpt-4o":
-        # Implement GPT-4o logic here if different from GPT-4o-mini
-        return run_gpt4o_mini(question)  # For now, using the same function
+        return run_gpt4o(question)
     else:
         return run_custom_model(model_name, question)

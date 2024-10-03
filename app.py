@@ -268,42 +268,55 @@ def save_results(username, model, prompt, context, response, evaluation):  # {{ 
     results_collection.insert_one(result)
 
 # Modify the run_custom_evaluations function
-def run_custom_evaluations(context_dataset, questions, selected_model, username):
+def run_custom_evaluations(data, selected_model, username):
     try:
         model_name = selected_model['model_name']
         model_id = selected_model['model_id']
+        model_type = selected_model.get('model_type', 'Unknown').lower()
         
-        # Update the context for this model
-        update_model_context(username, model_id, context_dataset)
+        if model_type == 'simple':
+            # For simple models, data is already in the correct format
+            test_cases = data
+        else:
+            # For other models, data is split into context_dataset and questions
+            context_dataset, questions = data
+            test_cases = [
+                {
+                    "prompt": extract_prompt_text(question),
+                    "context": context_dataset,
+                    "response": ""  # This will be filled by the model
+                }
+                for question in questions
+            ]
         
-        for question in questions:
-            # Ensure that 'prompt_text' is a string
-            prompt_text = extract_prompt_text(question)
+        for test_case in test_cases:
+            prompt_text = test_case["prompt"]
+            context = test_case["context"]
             
-            # Get the student model's response using runner.py (without context)
+            # Get the student model's response using runner.py
             try:
                 answer = run_model(model_name, prompt_text)
                 if answer is None or answer == "":
-                    st.warning(f"No response received from the model for question: {prompt_text}")
+                    st.warning(f"No response received from the model for prompt: {prompt_text}")
                     answer = "No response received from the model."
             except Exception as model_error:
-                st.error(f"Error running model for question: {prompt_text}")
+                st.error(f"Error running model for prompt: {prompt_text}")
                 st.error(f"Error details: {str(model_error)}")
                 answer = f"Error: {str(model_error)}"
             
-            # Get the teacher's evaluation (with context)
+            # Get the teacher's evaluation
             try:
-                evaluation = teacher_evaluate(prompt_text, context_dataset, answer)
+                evaluation = teacher_evaluate(prompt_text, context, answer)
                 if evaluation is None:
-                    st.warning(f"No evaluation received for question: {prompt_text}")
+                    st.warning(f"No evaluation received for prompt: {prompt_text}")
                     evaluation = {"Error": "No evaluation received"}
             except Exception as eval_error:
-                st.error(f"Error in teacher evaluation for question: {prompt_text}")
+                st.error(f"Error in teacher evaluation for prompt: {prompt_text}")
                 st.error(f"Error details: {str(eval_error)}")
                 evaluation = {"Error": str(eval_error)}
             
             # Save the results
-            save_results(username, selected_model, prompt_text, context_dataset, answer, evaluation)
+            save_results(username, selected_model, prompt_text, context, answer, evaluation)
         
         st.success("Evaluation completed successfully!")
     except Exception as e:
@@ -566,8 +579,7 @@ if st.session_state.user:
 
                 # Latest Metrics
                 st.subheader("Latest Metrics")
-                latest_result = df.iloc[-1]  # Get the last row (most recent query)
-                latest_metrics = {metric: latest_result[metric] for metric in metrics}
+                latest_metrics = df[metrics].mean()  # Calculate the average of all metrics
 
                 cols = st.columns(4)
                 for i, (metric, value) in enumerate(latest_metrics.items()):
@@ -575,6 +587,9 @@ if st.session_state.user:
                         color = 'green' if value >= 75 else 'orange' if value >= 50 else 'red'
                         st.metric(label=metric, value=f"{value:.2f}%", delta=None)
                         st.progress(value / 100)
+
+                # Add an explanation for the metrics
+                st.info("These metrics represent the average scores across all evaluations.")
 
                 # Detailed Data View
                 st.subheader("Detailed Data View")
@@ -1026,54 +1041,80 @@ if st.session_state.user:
 
         st.subheader("Input for Model Testing")
         
-        # Context Dataset Input
-        context_input_method = st.radio("Choose context input method:", ["Text Input", "File Upload"])
-        if context_input_method == "Text Input":
-            context_dataset = st.text_area("Enter Context Dataset (txt):", height=200)
-        else:
-            context_file = st.file_uploader("Upload Context Dataset", type=["txt"])
-            if context_file is not None:
-                context_dataset = context_file.getvalue().decode("utf-8")
-                st.success("Context file uploaded successfully!")
+        # For simple models, we'll use a single JSON file
+        if model_type.lower() == "simple":
+            st.write("For simple models, please upload a single JSON file containing prompts, contexts, and responses.")
+            json_file = st.file_uploader("Upload Test Data JSON", type=["json"])
+            
+            if json_file is not None:
+                try:
+                    test_data = json.load(json_file)
+                    st.success("Test data JSON file uploaded successfully!")
+                    
+                    # Display a preview of the test data
+                    st.write("Preview of test data:")
+                    st.json(test_data[:3] if len(test_data) > 3 else test_data)
+                    
+                except json.JSONDecodeError:
+                    st.error("Invalid JSON format. Please check your file.")
             else:
-                context_dataset = None
+                test_data = None
+        else:
+            # For other model types, keep the existing separate inputs for context and questions
+            context_input_method = st.radio("Choose context input method:", ["Text Input", "File Upload"])
+            if context_input_method == "Text Input":
+                context_dataset = st.text_area("Enter Context Dataset (txt):", height=200)
+            else:
+                context_file = st.file_uploader("Upload Context Dataset", type=["txt"])
+                if context_file is not None:
+                    context_dataset = context_file.getvalue().decode("utf-8")
+                    st.success("Context file uploaded successfully!")
+                else:
+                    context_dataset = None
 
-        # Questions Input
-        questions_input_method = st.radio("Choose questions input method:", ["Text Input", "File Upload"])
-        if questions_input_method == "Text Input":
-            questions_json = st.text_area("Enter Questions (JSON format):", height=200)
-        else:
-            questions_file = st.file_uploader("Upload Questions JSON", type=["json"])
-            if questions_file is not None:
-                questions_json = questions_file.getvalue().decode("utf-8")
-                st.success("Questions file uploaded successfully!")
+            questions_input_method = st.radio("Choose questions input method:", ["Text Input", "File Upload"])
+            if questions_input_method == "Text Input":
+                questions_json = st.text_area("Enter Questions (JSON format):", height=200)
             else:
-                questions_json = None
+                questions_file = st.file_uploader("Upload Questions JSON", type=["json"])
+                if questions_file is not None:
+                    questions_json = questions_file.getvalue().decode("utf-8")
+                    st.success("Questions file uploaded successfully!")
+                else:
+                    questions_json = None
         
         if st.button("Run Test"):
             if not model_name:
                 st.error("Please select or add a valid Model.")
-            elif not context_dataset or not questions_json:
+            elif model_type.lower() == "simple" and test_data is None:
+                st.error("Please upload a valid test data JSON file.")
+            elif model_type.lower() != "simple" and (not context_dataset or not questions_json):
                 st.error("Please provide both context dataset and questions JSON.")
             else:
                 try:
-                    questions = json.loads(questions_json)
                     selected_model = next(
                         (m for m in user_models if m['model_name'] == model_name),
                         None
                     )
                     if selected_model:
                         with st.spinner("Starting evaluations..."):
-                            evaluation_thread = threading.Thread(
-                                target=run_custom_evaluations, 
-                                args=(context_dataset, questions, selected_model, st.session_state.user)
-                            )
+                            if model_type.lower() == "simple":
+                                evaluation_thread = threading.Thread(
+                                    target=run_custom_evaluations, 
+                                    args=(test_data, selected_model, st.session_state.user)
+                                )
+                            else:
+                                questions = json.loads(questions_json)
+                                evaluation_thread = threading.Thread(
+                                    target=run_custom_evaluations, 
+                                    args=((context_dataset, questions), selected_model, st.session_state.user)
+                                )
                             evaluation_thread.start()
                             st.success("Evaluations are running in the background. You can navigate away or close the site.")
                     else:
                         st.error("Selected model not found.")
                 except json.JSONDecodeError:
-                    st.error("Invalid JSON format for questions. Please check your input.")
+                    st.error("Invalid JSON format. Please check your input.")
 
     elif app_mode == "Manage Models":
         st.title("Manage Your Models")
