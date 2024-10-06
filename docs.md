@@ -104,3 +104,6 @@ To maintain diversity:
 Output your generated data as a JSON array, with each entry following the specified format. Enclose the entire output within <synthetic_data> tags.
 
 Begin generating the synthetic data now.
+
+
+when the user in the custom model uploads a context.txt, chunk that and send to pinecone, and query the database with the user prompt to find the relevent content and compare that with the response we get by the llm, also when the prompt, context response is saved in the mongodb later, the context should be the retrieved context from pinecone, dont remove anything else

@@ -22,6 +22,8 @@ import plotly.graph_objs as go
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 import plotly.colors as plc
+import uuid
+import time  # Add this import at the top of your file
 
 # Add this helper function at the beginning of your file
 def extract_prompt_text(prompt):
@@ -151,10 +153,9 @@ def generate_embedding(text):
     try:
         embedding_response = openai_client.embeddings.create(
             model="text-embedding-3-large",  # {{ edit_3: Use the specified embedding model }}
-            input=text,
-            encoding_format="float"
+            input=text
         )
-        embedding = embedding_response["data"][0]["embedding"]
+        embedding = embedding_response.data[0].embedding
         return embedding
     except Exception as e:
         st.error(f"Error generating embedding: {str(e)}")
@@ -267,6 +268,64 @@ def save_results(username, model, prompt, context, response, evaluation):  # {{ 
     }
     results_collection.insert_one(result)
 
+# Function to chunk text
+def chunk_text(text, max_tokens=500):
+    tokens = tokenizer.encode(text)
+    chunks = []
+    current_chunk = []
+    current_length = 0
+
+    for token in tokens:
+        if current_length + 1 > max_tokens:
+            chunks.append(tokenizer.decode(current_chunk))
+            current_chunk = []
+            current_length = 0
+        current_chunk.append(token)
+        current_length += 1
+
+    if current_chunk:
+        chunks.append(tokenizer.decode(current_chunk))
+
+    return chunks
+
+# Function to upload context to Pinecone
+def upload_context_to_pinecone(context, username, model_name):
+    chunks = chunk_text(context)
+    index = pinecone_client.Index(os.getenv('PINECONE_INDEX_NAME'))
+    
+    namespace = f"{username}_{model_name}"  # Create a unique namespace for each user-model combination
+    
+    for chunk in chunks:
+        embedding = generate_embedding(chunk)
+        if embedding:
+            index.upsert([
+                {
+                    "id": str(uuid.uuid4()),
+                    "values": embedding,
+                    "metadata": {"text": chunk}
+                }
+            ], namespace=namespace)  # Use the namespace when upserting
+
+# Function to retrieve relevant context from Pinecone
+def retrieve_context_from_pinecone(prompt, username, model_name):
+    index = pinecone_client.Index(os.getenv('PINECONE_INDEX_NAME'))
+    prompt_embedding = generate_embedding(prompt)
+    
+    namespace = f"{username}_{model_name}"  # Use the same namespace format for retrieval
+    
+    if prompt_embedding:
+        results = index.query(
+            vector=prompt_embedding,
+            top_k=5,
+            namespace=namespace,  # Use the namespace when querying
+            include_metadata=True
+        )
+        
+        retrieved_context = " ".join([result.metadata['text'] for result in results.matches])
+        return retrieved_context
+    
+    return ""
+
 # Modify the run_custom_evaluations function
 def run_custom_evaluations(data, selected_model, username):
     try:
@@ -278,12 +337,16 @@ def run_custom_evaluations(data, selected_model, username):
             # For simple models, data is already in the correct format
             test_cases = data
         else:
-            # For other models, data is split into context_dataset and questions
+            # For custom models, data is split into context_dataset and questions
             context_dataset, questions = data
+            
+            # Upload context to Pinecone with user and model-specific namespace
+            upload_context_to_pinecone(context_dataset, username, model_name)
+            
             test_cases = [
                 {
                     "prompt": extract_prompt_text(question),
-                    "context": context_dataset,
+                    "context": "",  # This will be filled with retrieved context
                     "response": ""  # This will be filled by the model
                 }
                 for question in questions
@@ -291,6 +354,12 @@ def run_custom_evaluations(data, selected_model, username):
         
         for test_case in test_cases:
             prompt_text = test_case["prompt"]
+            
+            # For custom models, retrieve context from Pinecone using the user and model-specific namespace
+            if model_type != 'simple':
+                retrieved_context = retrieve_context_from_pinecone(prompt_text, username, model_name)
+                test_case["context"] = retrieved_context
+            
             context = test_case["context"]
             
             # Get the student model's response using runner.py
@@ -1061,27 +1130,21 @@ if st.session_state.user:
                 test_data = None
         else:
             # For other model types, keep the existing separate inputs for context and questions
-            context_input_method = st.radio("Choose context input method:", ["Text Input", "File Upload"])
-            if context_input_method == "Text Input":
-                context_dataset = st.text_area("Enter Context Dataset (txt):", height=200)
+            context_file = st.file_uploader("Upload Context Dataset", type=["txt"])
+            if context_file is not None:
+                context_dataset = context_file.getvalue().decode("utf-8")
+                st.success("Context file uploaded successfully!")
+                # Upload context to Pinecone with user and model-specific namespace
+                upload_context_to_pinecone(context_dataset, st.session_state.user, model_name)
             else:
-                context_file = st.file_uploader("Upload Context Dataset", type=["txt"])
-                if context_file is not None:
-                    context_dataset = context_file.getvalue().decode("utf-8")
-                    st.success("Context file uploaded successfully!")
-                else:
-                    context_dataset = None
+                context_dataset = None
 
-            questions_input_method = st.radio("Choose questions input method:", ["Text Input", "File Upload"])
-            if questions_input_method == "Text Input":
-                questions_json = st.text_area("Enter Questions (JSON format):", height=200)
+            questions_file = st.file_uploader("Upload Questions JSON", type=["json"])
+            if questions_file is not None:
+                questions_json = questions_file.getvalue().decode("utf-8")
+                st.success("Questions file uploaded successfully!")
             else:
-                questions_file = st.file_uploader("Upload Questions JSON", type=["json"])
-                if questions_file is not None:
-                    questions_json = questions_file.getvalue().decode("utf-8")
-                    st.success("Questions file uploaded successfully!")
-                else:
-                    questions_json = None
+                questions_json = None
         
         if st.button("Run Test"):
             if not model_name:
@@ -1139,13 +1202,13 @@ if st.session_state.user:
         
         if model_type == "Simple Model":
             new_model_name = st.text_input("Enter New Model Name:")
-            if st.button("Add Simple Model") or st.button("Add Custom Model"):
-                if new_model_name or selected_custom_model:
+            if st.button("Add Simple Model"):
+                if new_model_name:
                     model_id = f"{st.session_state.user}_model_{int(datetime.now().timestamp())}"
                     model_data = {
                         "model_id": model_id,
-                        "model_name": new_model_name if model_type == "Simple Model" else selected_custom_model,
-                        "model_type": "simple" if model_type == "Simple Model" else "custom",
+                        "model_name": new_model_name,
+                        "model_type": "simple",
                         "file_path": None,
                         "model_link": None,
                         "uploaded_at": datetime.now(),
@@ -1157,31 +1220,57 @@ if st.session_state.user:
                     )
                     st.success(f"Model '{model_data['model_name']}' added successfully as {model_id}!")
                 else:
-                    st.error("Please enter a valid model name or select a custom model.")
+                    st.error("Please enter a valid model name.")
         
         else:  # Custom Model
             custom_model_options = ["gpt-4o", "gpt-4o-mini"]
             selected_custom_model = st.selectbox("Select Custom Model:", custom_model_options)
             
             if st.button("Add Custom Model"):
-                model_id = f"{st.session_state.user}_model_{int(datetime.now().timestamp())}"
-                users_collection.update_one(
-                    {"username": st.session_state.user},
-                    {"$push": {"models": {
+                if selected_custom_model:
+                    model_id = f"{st.session_state.user}_model_{int(datetime.now().timestamp())}"
+                    model_data = {
                         "model_id": model_id,
                         "model_name": selected_custom_model,
                         "model_type": "custom",
                         "file_path": None,
                         "model_link": None,
                         "uploaded_at": datetime.now()
-                    }}}
-                )
-                st.success(f"Custom Model '{selected_custom_model}' added successfully as {model_id}!")
+                    }
+                    users_collection.update_one(
+                        {"username": st.session_state.user},
+                        {"$push": {"models": model_data}}
+                    )
+                    st.success(f"Custom Model '{selected_custom_model}' added successfully as {model_id}!")
+                else:
+                    st.error("Please select a valid custom model.")
         
         st.markdown("---")
         
         if user_models:
             st.subheader("Your Models")
+            
+            # Clear All Pinecone Data Button
+            if st.button("Clear All Pinecone Data"):
+                try:
+                    index = pinecone_client.Index(os.getenv('PINECONE_INDEX_NAME'))
+                    namespaces_cleared = []
+                    for model in user_models:
+                        model_name = model.get('model_name')
+                        if model_name:
+                            namespace = f"{st.session_state.user}_{model_name}"
+                            index.delete(delete_all=True, namespace=namespace)
+                            namespaces_cleared.append(model_name)
+                    
+                    if namespaces_cleared:
+                        st.success(f"Pinecone data cleared for all models: {', '.join(namespaces_cleared)}")
+                    else:
+                        st.info("No namespaces found to clear.")
+                except Exception as e:
+                    st.error(f"Error clearing all Pinecone data: {str(e)}")
+            
+            st.markdown("---")
+            
             for model in user_models:
                 st.markdown(f"**Model ID:** {model['model_id']}")
                 st.write(f"**Model Type:** {model.get('model_type', 'simple').capitalize()}")
@@ -1192,16 +1281,38 @@ if st.session_state.user:
                 st.write(f"**Uploaded at:** {model['uploaded_at']}")
                 
                 # Add delete option
-                if st.button(f"Delete {model['model_id']}"):
-                    # Delete the model file if exists and it's a Custom model
-                    if model['file_path'] and os.path.exists(model['file_path']):
-                        os.remove(model['file_path'])
-                    # Remove model from user's models list
-                    users_collection.update_one(
-                        {"username": st.session_state.user},
-                        {"$pull": {"models": {"model_id": model['model_id']}}}
-                    )
-                    st.success(f"Model {model['model_id']} deleted successfully!")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button(f"Delete {model['model_id']}", key=f"delete_{model['model_id']}"):
+                        # Delete the model file if exists and it's a Custom model
+                        if model['file_path'] and os.path.exists(model['file_path']):
+                            os.remove(model['file_path'])
+                        # Remove model from user's models list
+                        users_collection.update_one(
+                            {"username": st.session_state.user},
+                            {"$pull": {"models": {"model_id": model['model_id']}}}
+                        )
+                        st.success(f"Model {model['model_id']} deleted successfully!")
+                        time.sleep(2)  # Give user time to see the message
+                        st.experimental_rerun()  # Refresh the page
+                
+                # Modify clear Pinecone database option
+                with col2:
+                    if st.button(f"Clear Pinecone for {model['model_id']}", key=f"clear_pinecone_{model['model_id']}"):
+                        try:
+                            index = pinecone_client.Index(os.getenv('PINECONE_INDEX_NAME'))
+                            model_name = model.get('model_name')
+                            if model_name:
+                                namespace = f"{st.session_state.user}_{model_name}"
+                                index.delete(delete_all=True, namespace=namespace)
+                                st.success(f"Pinecone data cleared for {model['model_id']}!")
+                            else:
+                                st.error("Model name is missing. Cannot determine namespace.")
+                        except Exception as e:
+                            st.error(f"Error clearing Pinecone data for {model['model_id']}: {str(e)}")
+                
+                st.markdown("---")
+            
         else:
             st.info("You have no uploaded models.")
 
