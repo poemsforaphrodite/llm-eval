@@ -1,6 +1,10 @@
 import os
 from openai import OpenAI
 from dotenv import load_dotenv
+import openai
+import io
+from PIL import Image
+import base64  # {{ edit_add: Import base64 for image conversion }}
 
 # Load environment variables
 load_dotenv()
@@ -60,3 +64,40 @@ def run_model(model_name, question):
         return run_gpt4o(question)
     else:
         return run_custom_model(model_name, question)
+
+# {{ edit_final: Add function to summarize images }}
+def summarize_image(image_bytes: bytes) -> str:
+    try:
+        # Convert bytes to base64
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Please describe and summarize this image."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 300
+        }
+
+        response = openai_client.chat.completions.create(**payload)
+        
+        summary = response.choices[0].message.content.strip()
+        return summary
+
+    except Exception as e:
+        print(f"Error in summarize_image: {e}")
+        return "Failed to summarize the image."

@@ -14,7 +14,7 @@ from pinecone import Pinecone, ServerlessSpec
 import threading  # {{ edit_25: Import threading for background processing }}
 import tiktoken
 from tiktoken.core import Encoding
-from runner import run_model
+from runner import run_model, summarize_image  # {{ edit_add: Import necessary functions }}
 from bson.objectid import ObjectId
 import traceback  # Add this import at the top of your file
 import umap
@@ -24,6 +24,36 @@ from sklearn.cluster import KMeans
 import plotly.colors as plc
 import uuid
 import time  # Add this import at the top of your file
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration, AudioProcessorBase
+import av
+import io
+from typing import List
+
+# Add these imports at the beginning of your file
+from pydub import AudioSegment
+
+# Add this import at the top of your file
+import tempfile
+
+# Add this helper function for audio recording
+def process_audio(frame):
+    sound = frame.to_ndarray()
+    sound = sound.astype(np.int16)
+    return av.AudioFrame.from_ndarray(sound, layout="mono")
+
+# Add this helper function to convert WebRTC audio to a file
+def webrtc_audio_to_file(audio_frames):
+    audio = AudioSegment.empty()
+    for frame in audio_frames:
+        audio += AudioSegment(
+            data=frame.to_ndarray().tobytes(),
+            sample_width=frame.format.bytes,
+            frame_rate=frame.sample_rate,
+            channels=1
+        )
+    buffer = io.BytesIO()
+    audio.export(buffer, format="wav")
+    return buffer.getvalue()
 
 # Add this helper function at the beginning of your file
 def extract_prompt_text(prompt):
@@ -83,8 +113,6 @@ def signup(username, password):
         "models": []  # List to store user's models
     })
     return True
-def upload_model(file):
-    return "Model uploaded successfully!"
 
 # Function to perform evaluation (placeholder)
 def evaluate_model(model_identifier, metrics, username):
@@ -216,6 +244,7 @@ def index_context_data(model_name, texts):
                 ])
     except Exception as e:
         st.error(f"Error indexing data to Pinecone: {str(e)}")
+
 def upload_model(file, username, model_type):
     # {{ edit_5: Modify upload_model to handle model_type }}
     model_id = f"{username}_model_{int(datetime.now().timestamp())}"
@@ -252,6 +281,12 @@ def upload_model(file, username, model_type):
         return f"Named Model {model_id} registered successfully!"
     else:
         return "Invalid model type specified."
+    # {{ edit_30: Display uploaded models in the UI after uploading }}
+    st.write("### Uploaded Models")
+    user = users_collection.find_one({"username": username})
+    user_models = user.get("models", [])
+    for model in user_models:
+        st.write(f"- **{model['model_name']}** (ID: {model['model_id']})")
 
 # Function to save results to MongoDB
 def save_results(username, model, prompt, context, response, evaluation):  # {{ edit_29: Add 'username' parameter }}
@@ -326,6 +361,29 @@ def retrieve_context_from_pinecone(prompt, username, model_name):
     
     return ""
 
+def transcribe_audio(audio_file):
+    try:
+        # Save the uploaded file to a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio:
+            temp_audio.write(audio_file.read())
+            temp_audio_path = temp_audio.name
+
+        # Transcribe the audio using OpenAI's Whisper model
+        with open(temp_audio_path, "rb") as audio_file:
+            transcript = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                response_format="text"
+            )
+
+        # Remove the temporary file
+        os.unlink(temp_audio_path)
+
+        return transcript
+    except Exception as e:
+        st.error(f"Error transcribing audio: {str(e)}")
+        return None
+    
 # Modify the run_custom_evaluations function
 def run_custom_evaluations(data, selected_model, username):
     try:
@@ -913,7 +971,7 @@ if st.session_state.user:
                         - **Model Performance**: Analyze clusters to identify strengths and weaknesses of models.
                         - **Data Patterns**: Use clustering to uncover hidden patterns in your evaluation data.
 
-                        **Tips:**
+                        **Tips:** 
 
                         - Experiment with different numbers of clusters to find meaningful groupings.
                         - Adjust UMAP parameters to see how the clustering changes with different embeddings.
@@ -1087,317 +1145,247 @@ if st.session_state.user:
     elif app_mode == "Prompt Testing":
         st.title("Prompt Testing")
         
-        model_selection_option = st.radio("Select Model Option:", ["Choose Existing Model", "Add New Model"])
-        
-        if model_selection_option == "Choose Existing Model":
-            user = users_collection.find_one({"username": st.session_state.user})
-            user_models = user.get("models", [])
-            
-            if not user_models:
-                st.error("You have no uploaded models. Please upload a model first.")
-            else:
-                model_options = [
-                    f"{model['model_name']} ({model.get('model_type', 'Unknown').capitalize()})" 
-                    for model in user_models
-                ]
-                selected_model = st.selectbox("Select a Model for Testing", model_options)
-                
-                model_name = selected_model.split(" (")[0]
-                model_type = selected_model.split(" (")[1].rstrip(")")
-        else:
-            # Code for adding a new model (unchanged)
-            ...
-
-        st.subheader("Input for Model Testing")
-        
-        # For simple models, we'll use a single JSON file
-        if model_type.lower() == "simple":
-            st.write("For simple models, please upload a single JSON file containing prompts, contexts, and responses.")
-            json_file = st.file_uploader("Upload Test Data JSON", type=["json"])
-            
-            if json_file is not None:
-                try:
-                    test_data = json.load(json_file)
-                    st.success("Test data JSON file uploaded successfully!")
-                    
-                    # Display a preview of the test data
-                    st.write("Preview of test data:")
-                    st.json(test_data[:3] if len(test_data) > 3 else test_data)
-                    
-                except json.JSONDecodeError:
-                    st.error("Invalid JSON format. Please check your file.")
-            else:
-                test_data = None
-        else:
-            # For other model types, keep the existing separate inputs for context and questions
-            context_file = st.file_uploader("Upload Context Dataset", type=["txt"])
-            if context_file is not None:
-                context_dataset = context_file.getvalue().decode("utf-8")
-                st.success("Context file uploaded successfully!")
-                # Upload context to Pinecone with user and model-specific namespace
-                upload_context_to_pinecone(context_dataset, st.session_state.user, model_name)
-            else:
-                context_dataset = None
-
-            questions_file = st.file_uploader("Upload Questions JSON", type=["json"])
-            if questions_file is not None:
-                questions_json = questions_file.getvalue().decode("utf-8")
-                st.success("Questions file uploaded successfully!")
-            else:
-                questions_json = None
-        
-        if st.button("Run Test"):
-            if not model_name:
-                st.error("Please select or add a valid Model.")
-            elif model_type.lower() == "simple" and test_data is None:
-                st.error("Please upload a valid test data JSON file.")
-            elif model_type.lower() != "simple" and (not context_dataset or not questions_json):
-                st.error("Please provide both context dataset and questions JSON.")
-            else:
-                try:
-                    selected_model = next(
-                        (m for m in user_models if m['model_name'] == model_name),
-                        None
-                    )
-                    if selected_model:
-                        with st.spinner("Starting evaluations..."):
-                            if model_type.lower() == "simple":
-                                evaluation_thread = threading.Thread(
-                                    target=run_custom_evaluations, 
-                                    args=(test_data, selected_model, st.session_state.user)
-                                )
-                            else:
-                                questions = json.loads(questions_json)
-                                evaluation_thread = threading.Thread(
-                                    target=run_custom_evaluations, 
-                                    args=((context_dataset, questions), selected_model, st.session_state.user)
-                                )
-                            evaluation_thread.start()
-                            st.success("Evaluations are running in the background. You can navigate away or close the site.")
-                    else:
-                        st.error("Selected model not found.")
-                except json.JSONDecodeError:
-                    st.error("Invalid JSON format. Please check your input.")
-
-    elif app_mode == "Manage Models":
-        st.title("Manage Your Models")
-        # Fetch the user from the database
         user = users_collection.find_one({"username": st.session_state.user})
-        if user is None:
-            st.error("User not found in the database.")
-            st.stop()
         user_models = user.get("models", [])
         
-        # Update existing models to ensure they have a model_type
-        for model in user_models:
-            if 'model_type' not in model:
-                model['model_type'] = 'simple'  # Default to 'simple' for existing models
-        users_collection.update_one(
-            {"username": st.session_state.user},
-            {"$set": {"models": user_models}}
-        )
-        
-        st.subheader("Add a New Model")
-        model_type = st.radio("Select Model Type:", ["Simple Model", "Custom Model"])
-        
-        if model_type == "Simple Model":
-            new_model_name = st.text_input("Enter New Model Name:")
-            if st.button("Add Simple Model"):
-                if new_model_name:
-                    model_id = f"{st.session_state.user}_model_{int(datetime.now().timestamp())}"
-                    model_data = {
-                        "model_id": model_id,
-                        "model_name": new_model_name,
-                        "model_type": "simple",
-                        "file_path": None,
-                        "model_link": None,
-                        "uploaded_at": datetime.now(),
-                        "context": None  # We'll update this when running evaluations
-                    }
-                    users_collection.update_one(
-                        {"username": st.session_state.user},
-                        {"$push": {"models": model_data}}
-                    )
-                    st.success(f"Model '{model_data['model_name']}' added successfully as {model_id}!")
-                else:
-                    st.error("Please enter a valid model name.")
-        
-        else:  # Custom Model
-            custom_model_options = ["gpt-4o", "gpt-4o-mini"]
-            selected_custom_model = st.selectbox("Select Custom Model:", custom_model_options)
-            
-            if st.button("Add Custom Model"):
-                if selected_custom_model:
-                    model_id = f"{st.session_state.user}_model_{int(datetime.now().timestamp())}"
-                    model_data = {
-                        "model_id": model_id,
-                        "model_name": selected_custom_model,
-                        "model_type": "custom",
-                        "file_path": None,
-                        "model_link": None,
-                        "uploaded_at": datetime.now()
-                    }
-                    users_collection.update_one(
-                        {"username": st.session_state.user},
-                        {"$push": {"models": model_data}}
-                    )
-                    st.success(f"Custom Model '{selected_custom_model}' added successfully as {model_id}!")
-                else:
-                    st.error("Please select a valid custom model.")
-        
-        st.markdown("---")
-        
-        if user_models:
-            st.subheader("Your Models")
-            
-            # Clear All Pinecone Data Button
-            if st.button("Clear All Pinecone Data"):
-                try:
-                    index = pinecone_client.Index(os.getenv('PINECONE_INDEX_NAME'))
-                    namespaces_cleared = []
-                    for model in user_models:
-                        model_name = model.get('model_name')
-                        if model_name:
-                            namespace = f"{st.session_state.user}_{model_name}"
-                            index.delete(delete_all=True, namespace=namespace)
-                            namespaces_cleared.append(model_name)
-                    
-                    if namespaces_cleared:
-                        st.success(f"Pinecone data cleared for all models: {', '.join(namespaces_cleared)}")
-                    else:
-                        st.info("No namespaces found to clear.")
-                except Exception as e:
-                    st.error(f"Error clearing all Pinecone data: {str(e)}")
-            
-            st.markdown("---")
-            
-            for model in user_models:
-                st.markdown(f"**Model ID:** {model['model_id']}")
-                st.write(f"**Model Type:** {model.get('model_type', 'simple').capitalize()}")
-                if model.get("model_name"):
-                    st.write(f"**Model Name:** {model['model_name']}")
-                if model.get("file_path"):
-                    st.write(f"**File Path:** {model['file_path']}")
-                st.write(f"**Uploaded at:** {model['uploaded_at']}")
-                
-                # Add delete option
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button(f"Delete {model['model_id']}", key=f"delete_{model['model_id']}"):
-                        # Delete the model file if exists and it's a Custom model
-                        if model['file_path'] and os.path.exists(model['file_path']):
-                            os.remove(model['file_path'])
-                        # Remove model from user's models list
-                        users_collection.update_one(
-                            {"username": st.session_state.user},
-                            {"$pull": {"models": {"model_id": model['model_id']}}}
-                        )
-                        st.success(f"Model {model['model_id']} deleted successfully!")
-                        time.sleep(2)  # Give user time to see the message
-                        st.experimental_rerun()  # Refresh the page
-                
-                # Modify clear Pinecone database option
-                with col2:
-                    if st.button(f"Clear Pinecone for {model['model_id']}", key=f"clear_pinecone_{model['model_id']}"):
-                        try:
-                            index = pinecone_client.Index(os.getenv('PINECONE_INDEX_NAME'))
-                            model_name = model.get('model_name')
-                            if model_name:
-                                namespace = f"{st.session_state.user}_{model_name}"
-                                index.delete(delete_all=True, namespace=namespace)
-                                st.success(f"Pinecone data cleared for {model['model_id']}!")
-                            else:
-                                st.error("Model name is missing. Cannot determine namespace.")
-                        except Exception as e:
-                            st.error(f"Error clearing Pinecone data for {model['model_id']}: {str(e)}")
-                
-                st.markdown("---")
-            
+        if not user_models:
+            st.error("You have no uploaded models. Please upload a model first.")
         else:
-            st.info("You have no uploaded models.")
-
-    elif app_mode == "History":  # {{ edit_add: Enhanced History UI }}
-        st.title("History")
-        st.write("### Your Evaluation History")
-        
-        try:
-            # Fetch all evaluation results for the current user from MongoDB
-            user_results = list(results_collection.find({"username": st.session_state.user}).sort("timestamp", -1))
+            model_options = [
+                f"{model['model_name']} ({model.get('model_type', 'Unknown').capitalize()})" 
+                for model in user_models
+            ]
+            selected_model = st.selectbox("Select a Model for Testing", model_options)
             
-            if user_results:
-                # Convert results to a pandas DataFrame
-                df = pd.DataFrame(user_results)
-                
-                # Extract prompt text using the helper function
-                df['prompt'] = df['prompt'].apply(extract_prompt_text)
-                
-                # Normalize the evaluation JSON into separate columns
-                eval_df = df['evaluation'].apply(pd.Series)
-                for metric in ["Accuracy", "Hallucination", "Groundedness", "Relevance", "Recall", "Precision", "Consistency", "Bias Detection"]:
-                    if metric in eval_df.columns:
-                        df[metric + " Score"] = eval_df[metric].apply(lambda x: x.get('score', 0) * 100 if isinstance(x, dict) else 0)
-                        df[metric + " Explanation"] = eval_df[metric].apply(lambda x: x.get('explanation', '') if isinstance(x, dict) else '')
-                    else:
-                        df[metric + " Score"] = 0
-                        df[metric + " Explanation"] = ""
-                
-                # Select relevant columns to display
-                display_df = df[[
-                    "timestamp", "model_name", "prompt", "context", "response", 
-                    "Accuracy Score", "Hallucination Score", "Groundedness Score",
-                    "Relevance Score", "Recall Score", "Precision Score",
-                    "Consistency Score", "Bias Detection Score"
-                ]]
-                
-                # Rename columns for better readability
-                display_df = display_df.rename(columns={
-                    "timestamp": "Timestamp",
-                    "model_name": "Model Name",
-                    "prompt": "Prompt",
-                    "context": "Context",
-                    "response": "Response",
-                    "Accuracy Score": "Accuracy (%)",
-                    "Hallucination Score": "Hallucination (%)",
-                    "Groundedness Score": "Groundedness (%)",
-                    "Relevance Score": "Relevance (%)",
-                    "Recall Score": "Recall (%)",
-                    "Precision Score": "Precision (%)",
-                    "Consistency Score": "Consistency (%)",
-                    "Bias Detection Score": "Bias Detection (%)"
-                })
-                
-                # Convert timestamp to a readable format
-                display_df['Timestamp'] = pd.to_datetime(display_df['Timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
-                
-                st.subheader("Evaluation Results")
-                
-                # Display the DataFrame with enhanced styling
-                st.dataframe(
-                    display_df.style.set_properties(**{
-                        'background-color': '#f0f8ff',
-                        'color': '#333',
-                        'border': '1px solid #ddd'
-                    }).set_table_styles([
-                        {'selector': 'th', 'props': [('background-color', '#f5f5f5'), ('text-align', 'center')]},
-                        {'selector': 'td', 'props': [('text-align', 'left'), ('vertical-align', 'top')]}
-                    ]).format({
-                        "Accuracy (%)": "{:.2f}",
-                        "Hallucination (%)": "{:.2f}",
-                        "Groundedness (%)": "{:.2f}",
-                        "Relevance (%)": "{:.2f}",
-                        "Recall (%)": "{:.2f}",
-                        "Precision (%)": "{:.2f}",
-                        "Consistency (%)": "{:.2f}",
-                        "Bias Detection (%)": "{:.2f}"
-                    }), use_container_width=True
-                )
-                
+            model_name = selected_model.split(" (")[0]
+            model_type = selected_model.split(" (")[1].rstrip(")")
+            
+            st.subheader("Input for Model Testing")
+            
+            if model_type.lower() == "simple":
+                input_type = st.radio("Select Input Type:", ["Text", "Audio", "Image"])  # {{ edit_final: Added "Image" option }}
             else:
-                st.info("You have no evaluation history yet.")
-        
-        except Exception as e:
-            st.error(f"Error fetching history data: {e}")
+                input_type = "Text"
+            
+            if input_type == "Text":
+                if model_type.lower() == "simple":
+                    st.write("For simple models, please upload a single JSON file containing prompts, contexts, and responses.")
+                    json_file = st.file_uploader("Upload Test Data JSON", type=["json"])
+                    
+                    if json_file is not None:
+                        try:
+                            test_data = json.load(json_file)
+                            st.success("Test data JSON file uploaded successfully!")
+                            
+                            # Display a preview of the test data
+                            st.write("Preview of test data:")
+                            st.json(test_data[:3] if len(test_data) > 3 else test_data)
+                            
+                        except json.JSONDecodeError:
+                            st.error("Invalid JSON format. Please check your file.")
+                    else:
+                        test_data = None
+                else:
+                    # For other model types, keep the existing separate inputs for context and questions
+                    context_file = st.file_uploader("Upload Context Dataset", type=["txt"])
+                    if context_file is not None:
+                        context_dataset = context_file.getvalue().decode("utf-8")
+                        st.success("Context file uploaded successfully!")
+                        # Upload context to Pinecone with user and model-specific namespace
+                        upload_context_to_pinecone(context_dataset, st.session_state.user, model_name)
+                    else:
+                        context_dataset = None
 
-# Add a footer
-st.sidebar.markdown("---")
-st.sidebar.info("LLM Evaluation System - v0.2")
+                    questions_file = st.file_uploader("Upload Questions JSON", type=["json"])
+                    if questions_file is not None:
+                        questions_json = questions_file.getvalue().decode("utf-8")
+                        st.success("Questions file uploaded successfully!")
+                    else:
+                        questions_json = None
+            
+            elif input_type == "Audio":
+                st.write("Please upload audio files for Prompts, Contexts, and Responses.")
+                prompt_audio = st.file_uploader("Upload Prompt Audio", type=["mp3", "wav"])
+                context_audio = st.file_uploader("Upload Context Audio", type=["mp3", "wav"])
+                response_audio = st.file_uploader("Upload Response Audio", type=["mp3", "wav"])
+                
+                if prompt_audio:
+                    st.audio(prompt_audio, format='audio/wav')
+                    st.write(f"**Uploaded Prompt Audio:** {prompt_audio.name}")
+                if context_audio:
+                    st.audio(context_audio, format='audio/wav')
+                    st.write(f"**Uploaded Context Audio:** {context_audio.name}")
+                if response_audio:
+                    st.audio(response_audio, format='audio/wav')
+                    st.write(f"**Uploaded Response Audio:** {response_audio.name}")
+            
+            elif input_type == "Image":
+                st.write("Please upload image files for Prompt, Context, and Response.")
+                prompt_image = st.file_uploader("Upload Prompt Image", type=["png", "jpg", "jpeg"])
+                context_image = st.file_uploader("Upload Context Image", type=["png", "jpg", "jpeg"])
+                response_image = st.file_uploader("Upload Response Image", type=["png", "jpg", "jpeg"])
+
+                if prompt_image:
+                    st.image(prompt_image, caption='Uploaded Prompt Image.', use_column_width=True)
+                    st.write(f"**Uploaded Prompt Image:** {prompt_image.name}")
+                if context_image:
+                    st.image(context_image, caption='Uploaded Context Image.', use_column_width=True)
+                    st.write(f"**Uploaded Context Image:** {context_image.name}")
+                if response_image:
+                    st.image(response_image, caption='Uploaded Response Image.', use_column_width=True)
+                    st.write(f"**Uploaded Response Image:** {response_image.name}")
+
+            # {{ edit_final: Handle Run Test for Image input with three images }}
+            if st.button("Run Test"):
+                if not model_name:
+                    st.error("Please select a valid Model.")
+                elif input_type == "Text":
+                    if model_type.lower() == "simple" and test_data is None:
+                        st.error("Please upload a valid test data JSON file.")
+                    elif model_type.lower() != "simple" and (not context_dataset or not questions_json):
+                        st.error("Please provide both context dataset and questions JSON.")
+                    else:
+                        try:
+                            selected_model = next(
+                                (m for m in user_models if m['model_name'] == model_name),
+                                None
+                            )
+                            if selected_model:
+                                with st.spinner("Starting evaluations..."):
+                                    # {{ edit_3: Use fixed_metrics instead of user-selected metrics }}
+                                    results = evaluate_model(model_identifier, fixed_metrics, st.session_state.user)
+                                    
+                                    # Fetch the current model document
+                                    current_model = next((m for m in user_models if (m['model_name'] == model_identifier) or (m['model_id'] == model_identifier)), None)
+                                    if current_model:
+                                        save_results(st.session_state.user, current_model, prompt, context, response, results)  # {{ edit_21: Pass current_model to save_results }}
+                                        st.success("Evaluation Completed!")
+                                        st.json(results)
+                                    else:
+                                        st.error("Selected model not found.")
+                        except Exception as e:
+                            st.error(f"An error occurred: {e}")
+                elif input_type == "Audio":
+                    if model_type.lower() == "simple" and test_data is None:
+                        st.error("Please upload a valid test data JSON file.")
+                    elif model_type.lower() != "simple" and (not context_dataset or not questions_json):
+                        st.error("Please provide both context dataset and questions JSON.")
+                    else:
+                        try:
+                            selected_model = next(
+                                (m for m in user_models if m['model_name'] == model_name),
+                                None
+                            )
+                            if selected_model:
+                                with st.spinner("Processing audio files..."):
+                                    prompt_text = transcribe_audio(prompt_audio)
+                                    context_text = transcribe_audio(context_audio)
+                                    response_text = transcribe_audio(response_audio)
+
+                                test_data = [
+                                    {
+                                        "prompt": prompt_text,
+                                        "context": context_text,
+                                        "response": response_text
+                                    }
+                                ]
+                                
+                                with st.spinner("Starting evaluations..."):
+                                    evaluation_thread = threading.Thread(
+                                        target=run_custom_evaluations, 
+                                        args=(test_data, selected_model, st.session_state.user)
+                                    )
+                                    evaluation_thread.start()
+                                    st.success("Evaluations are running in the background. You can navigate away or close the site.")
+                            else:
+                                st.error("Selected model not found.")
+                        except Exception as e:
+                            st.error(f"An error occurred: {e}")
+                elif input_type == "Image":
+                    if not (prompt_image and context_image and response_image):
+                        st.error("Please upload all three image files: Prompt, Context, and Response.")
+                    else:
+                        try:
+                            selected_model = next(
+                                (m for m in user_models if m['model_name'] == model_name),
+                                None
+                            )
+                            if selected_model:
+                                with st.spinner("Processing images and starting evaluations..."):
+                                    # Convert images to binary
+                                    prompt_bytes = prompt_image.read()
+                                    context_bytes = context_image.read()
+                                    response_bytes = response_image.read()
+                                    
+                                    # Use runner.py to summarize the images
+                                    prompt_summary = summarize_image(prompt_bytes)
+                                    context_summary = summarize_image(context_bytes)
+                                    response_summary = summarize_image(response_bytes)
+                                    
+                                    if prompt_summary and context_summary and response_summary:
+                                        # Prepare test data with summaries
+                                        test_data = [
+                                            {
+                                                "prompt": prompt_summary,
+                                                "context": context_summary,
+                                                "response": response_summary
+                                            }
+                                        ]
+                                        
+                                        # Start the evaluation in a separate thread
+                                        evaluation_thread = threading.Thread(
+                                            target=run_custom_evaluations, 
+                                            args=(test_data, selected_model, st.session_state.user)
+                                        )
+                                        evaluation_thread.start()
+                                        st.success("Images processed and evaluations are running in the background. You can navigate away or close the site.")
+                                    else:
+                                        st.error("Failed to generate summaries for the uploaded images.")
+                            else:
+                                st.error("Selected model not found.")
+                        except Exception as e:
+                            st.error(f"An error occurred: {e}")
+                elif input_type == "Image":
+                    if not (prompt_image and context_image and response_image):
+                        st.error("Please upload all three image files: Prompt, Context, and Response.")
+                    else:
+                        try:
+                            selected_model = next(
+                                (m for m in user_models if m['model_name'] == model_name),
+                                None
+                            )
+                            if selected_model:
+                                with st.spinner("Processing images and starting evaluations..."):
+                                    # Convert images to binary
+                                    prompt_bytes = prompt_image.read()
+                                    context_bytes = context_image.read()
+                                    response_bytes = response_image.read()
+                                    
+                                    # Use runner.py to summarize the images
+                                    prompt_summary = summarize_image(prompt_bytes)
+                                    context_summary = summarize_image(context_bytes)
+                                    response_summary = summarize_image(response_bytes)
+                                    
+                                    if prompt_summary and context_summary and response_summary:
+                                        # Prepare test data with summaries
+                                        test_data = [
+                                            {
+                                                "prompt": prompt_summary,
+                                                "context": context_summary,
+                                                "response": response_summary
+                                            }
+                                        ]
+                                        
+                                        # Start the evaluation in a separate thread
+                                        evaluation_thread = threading.Thread(
+                                            target=run_custom_evaluations, 
+                                            args=(test_data, selected_model, st.session_state.user)
+                                        )
+                                        evaluation_thread.start()
+                                        st.success("Images processed and evaluations are running in the background. You can navigate away or close the site.")
+                                    else:
+                                        st.error("Failed to generate summaries for the uploaded images.")
+                            else:
+                                st.error("Selected model not found.")
+                        except Exception as e:
+                            st.error(f"An error occurred: {e}")
